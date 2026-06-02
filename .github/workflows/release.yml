@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install 7-Zip
+        run: choco install 7zip -y
+
+      - name: Download libmpv
+        run: |
+          $api = 'https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest'
+          $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'mpv-ne-ci' }
+          $asset = $rel.assets | Where-Object { $_.name -like 'mpv-dev-x86_64-*.7z' } | Select-Object -First 1
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mpv-dev.7z
+          7z e mpv-dev.7z libmpv-2.dll -y
+          Copy-Item libmpv-2.dll mpv-lib\libmpv-2.dll -Force
+
+      - name: Build release
+        run: cargo build --release
+        env:
+          MPV_DLL_DIR: ${{ github.workspace }}\mpv-lib
+
+      - name: Package release
+        run: |
+          mkdir release
+          Copy-Item target\release\mpv-ne.exe release\
+          Copy-Item target\release\libmpv-2.dll release\
+          Copy-Item README.md release\
+          Compress-Archive -Path release\* -DestinationPath mpv-ne-${{ github.ref_name }}-windows-x64.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mpv-ne-${{ github.ref_name }}-windows-x64.zip
+          generate_release_notes: true

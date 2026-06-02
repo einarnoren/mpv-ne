@@ -1,0 +1,19 @@
+# Rust build output
+/target/
+
+# Runtime DLL - not redistributable, obtain separately (see README)
+*.dll
+
+# mpv-lib/ contains only the import stub (.lib) - not the DLL or source
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local dev tools
+.claude/
