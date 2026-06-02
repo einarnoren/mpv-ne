@@ -241,6 +241,7 @@ pub struct MpvNe {
     pub screenshot_dir: String,
     /// Suppresses the next volume OSD (used when restoring saved volume at startup).
     suppress_volume_osd: bool,
+    suppress_speed_osd: bool,
     pub show_help: bool,
     pub sub_search_open: bool,
     pub sub_search_query: String,
@@ -329,6 +330,7 @@ impl Default for MpvNe {
             },
             screenshot_dir: crate::settings::Settings::load().screenshot_dir,
             suppress_volume_osd: false,
+            suppress_speed_osd: true, // suppress the startup 1x event
             show_help: false,
             sub_search_open: false,
             sub_search_query: String::new(),
@@ -865,12 +867,16 @@ impl MpvNe {
             Message::CloseAudioMenu => self.audio_menu_open = false,
             Message::SpeedChanged(s) => {
                 self.player.speed = s;
-                let label = if (s - 1.0).abs() < 0.01 {
-                    "Speed  1x (normal)".into()
+                if self.suppress_speed_osd {
+                    self.suppress_speed_osd = false;
                 } else {
-                    format!("Speed  {:.2}x", s)
-                };
-                return Task::done(Message::ShowOsd(label));
+                    let label = if (s - 1.0).abs() < 0.01 {
+                        "Speed  1x (normal)".into()
+                    } else {
+                        format!("Speed  {:.2}x", s)
+                    };
+                    return Task::done(Message::ShowOsd(label));
+                }
             }
             Message::SpeedAdjust(delta) => {
                 let new_speed = (self.player.speed + delta).clamp(0.25, 4.0);
