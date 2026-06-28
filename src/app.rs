@@ -96,6 +96,7 @@ pub enum Action {
     PrevFile,
     NextFile,
     OpenFile,
+    AddBookmark,
 }
 
 /// Maps every input trigger to an optional Action. `None` means the input is
@@ -136,6 +137,7 @@ impl Default for Bindings {
         keys.insert("\\".into(), Action::SpeedReset);
         keys.insert("v".into(), Action::ToggleSubVisibility);
         keys.insert("i".into(), Action::ToggleHwDec);
+        keys.insert("b".into(), Action::AddBookmark);
 
         Self {
             keys,
@@ -174,6 +176,7 @@ fn action_to_message(a: Action) -> Message {
         Action::PrevFile => Message::PrevFile,
         Action::NextFile => Message::NextFile,
         Action::OpenFile => Message::OpenFile,
+        Action::AddBookmark => Message::AddBookmark,
     }
 }
 
@@ -419,6 +422,9 @@ pub enum Message {
     AudioTrackSelected(crate::player::AudioTrack),
     SpeedChanged(f64),
     LiveEdgeTick,
+    AddBookmark,
+    RemoveBookmark(usize),
+    JumpToBookmark(f64),
     // Input
     TogglePause,
     ToggleMute,
@@ -619,6 +625,10 @@ impl MpvNe {
                 let mut prefs = crate::settings::Settings::load();
                 prefs.volume = self.player.volume;
                 prefs.save();
+                if let Some(path) = &self.player.path.clone() {
+                    self.resume_db.record_volume(path, self.player.volume);
+                    self.resume_db.save();
+                }
                 if self.suppress_volume_osd {
                     self.suppress_volume_osd = false;
                 } else {
@@ -833,6 +843,18 @@ impl MpvNe {
                 self.video_hflip = false;
                 self.video_vflip = false;
                 self.file_info_osd_shown = false;
+                // Restore per-file preferences: volume, audio track, subtitle track.
+                if let Some(path) = &self.player.path.clone() {
+                    if let Some(vol) = self.resume_db.volume(path) {
+                        self.player.set_volume(vol);
+                    }
+                    if let Some(aid) = self.resume_db.audio_track(path) {
+                        self.player.set_audio_track(aid);
+                    }
+                    if let Some(sid) = self.resume_db.sub_track(path) {
+                        self.player.set_sub_track(sid);
+                    }
+                }
                 // Check for a saved resume position and seek to it (if enabled).
                 if self.resume_enabled {
                 if let Some(path) = &self.player.path.clone() {
@@ -857,6 +879,31 @@ impl MpvNe {
                 }
             }
             Message::EofReached(false) => {}
+            Message::AddBookmark => {
+                if let Some(path) = &self.player.path.clone() {
+                    let pos = self.player.position;
+                    let s = pos as u64;
+                    let label = if s >= 3600 {
+                        format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+                    } else {
+                        format!("{:02}:{:02}", s / 60, s % 60)
+                    };
+                    self.resume_db.add_bookmark(path, pos, label.clone());
+                    self.resume_db.save();
+                    return Task::done(Message::ShowOsd(format!("Bookmark  {}", label)));
+                }
+            }
+            Message::RemoveBookmark(idx) => {
+                if let Some(path) = &self.player.path.clone() {
+                    self.resume_db.remove_bookmark(path, idx);
+                    self.resume_db.save();
+                }
+            }
+            Message::JumpToBookmark(pos) => {
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
+                self.player.seek(pos);
+            }
             Message::LiveEdgeTick => {
                 // mpv's demuxer doesn't fire DurationChanged while keep-open pauses
                 // at EOF, so we poke play() every 2s. mpv will resume if new content
@@ -1002,6 +1049,10 @@ impl MpvNe {
             Message::SubTrackSelected(track) => {
                 self.player.set_sub_track(track.id);
                 self.subs_menu_open = false;
+                if let Some(path) = &self.player.path.clone() {
+                    self.resume_db.record_sub_track(path, track.id);
+                    self.resume_db.save();
+                }
                 return Task::done(Message::ShowOsd(format!("Subtitles  {}", track.label)));
             }
             Message::ToggleSubsMenu => {
@@ -1016,6 +1067,10 @@ impl MpvNe {
             Message::AudioTrackSelected(track) => {
                 self.player.set_audio_track(track.id);
                 self.audio_menu_open = false;
+                if let Some(path) = &self.player.path.clone() {
+                    self.resume_db.record_audio_track(path, track.id);
+                    self.resume_db.save();
+                }
                 return Task::done(Message::ShowOsd(format!("Audio  {}", track.label)));
             }
             Message::CycleAudio => {
@@ -2252,6 +2307,9 @@ impl MpvNe {
                     self.player.height as u32,
                 );
             }
+            self.resume_db.record_audio_track(&path, self.player.current_aid);
+            self.resume_db.record_sub_track(&path, self.player.current_sid);
+            self.resume_db.record_volume(&path, self.player.volume);
             self.resume_db.save();
         }
     }

@@ -180,6 +180,77 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         None
     };
 
+    // ── Bookmark list ─────────────────────────────────────────────────────────
+    let bookmarks_section: Option<Element<'_, Message>> = {
+        let bmarks = app.player.path.as_deref()
+            .map(|p| app.resume_db.bookmarks(p))
+            .unwrap_or(&[]);
+        if bmarks.is_empty() {
+            None
+        } else {
+            let rows: Vec<Element<'_, Message>> = bmarks.iter().enumerate().map(|(i, b)| {
+                let jump_btn = button(
+                    row![
+                        text(&b.label).size(11).color(AURORA_TEAL).width(Length::Fixed(52.0)),
+                        text("⚑").size(10).color(TEXT_MUTED),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                )
+                .padding([4, 10])
+                .width(Length::Fill)
+                .style(|_, status| {
+                    use iced::widget::button::Status;
+                    let bg = match status {
+                        Status::Hovered | Status::Pressed => BG_HOVER,
+                        _ => BG_DEEPEST,
+                    };
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border { radius: iced::border::Radius::new(3.0), ..Default::default() },
+                        ..Default::default()
+                    }
+                })
+                .on_press(Message::JumpToBookmark(b.position));
+
+                let del_btn = button(text("×").size(13).color(TEXT_MUTED))
+                    .padding([4, 7])
+                    .style(|_, status| {
+                        use iced::widget::button::Status;
+                        let bg = match status {
+                            Status::Hovered | Status::Pressed => BG_HOVER,
+                            _ => iced::Color::TRANSPARENT,
+                        };
+                        iced::widget::button::Style {
+                            background: Some(iced::Background::Color(bg)),
+                            border: iced::Border { radius: iced::border::Radius::new(3.0), ..Default::default() },
+                            ..Default::default()
+                        }
+                    })
+                    .on_press(Message::RemoveBookmark(i));
+
+                row![jump_btn, del_btn]
+                    .spacing(2)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill)
+                    .into()
+            }).collect();
+
+            Some(column![
+                container(text("Bookmarks").size(11).color(TEXT_MUTED))
+                    .padding([6, 10])
+                    .width(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(iced::Background::Color(BG_SURFACE)),
+                        ..Default::default()
+                    }),
+                column(rows).width(Length::Fill).spacing(1).padding([2, 4]),
+            ]
+            .width(Length::Fill)
+            .into())
+        }
+    };
+
     let shuffle_btn = button(text("Shuffle").size(11).color(AURORA_PURPLE))
         .padding([3, 8])
         .style(|_, status| {
@@ -258,6 +329,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let mut body = column![entries].width(Length::Fill).height(Length::Fill);
     if let Some(chapters) = chapters_section {
         body = body.push(chapters);
+    }
+    if let Some(bookmarks) = bookmarks_section {
+        body = body.push(bookmarks);
     }
 
     let panel = container(

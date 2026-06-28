@@ -10,12 +10,22 @@ use std::path::PathBuf;
 
 const MAX_ENTRIES: usize = 2000;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub position: f64,
+    pub label: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ResumeDb {
-    positions:   HashMap<String, f64>,
-    #[serde(default)] durations:   HashMap<String, f64>,
-    #[serde(default)] resolutions: HashMap<String, (u32, u32)>,
-    #[serde(default)] last_played: HashMap<String, u64>,
+    positions:    HashMap<String, f64>,
+    #[serde(default)] durations:    HashMap<String, f64>,
+    #[serde(default)] resolutions:  HashMap<String, (u32, u32)>,
+    #[serde(default)] last_played:  HashMap<String, u64>,
+    #[serde(default)] audio_tracks: HashMap<String, i64>,
+    #[serde(default)] sub_tracks:   HashMap<String, i64>,
+    #[serde(default)] volumes:      HashMap<String, f64>,
+    #[serde(default)] bookmarks:    HashMap<String, Vec<Bookmark>>,
 }
 
 impl ResumeDb {
@@ -54,6 +64,22 @@ impl ResumeDb {
         self.last_played.get(file_path).copied().filter(|&t| t > 0)
     }
 
+    pub fn audio_track(&self, file_path: &str) -> Option<i64> {
+        self.audio_tracks.get(file_path).copied()
+    }
+
+    pub fn sub_track(&self, file_path: &str) -> Option<i64> {
+        self.sub_tracks.get(file_path).copied()
+    }
+
+    pub fn volume(&self, file_path: &str) -> Option<f64> {
+        self.volumes.get(file_path).copied()
+    }
+
+    pub fn bookmarks(&self, file_path: &str) -> &[Bookmark] {
+        self.bookmarks.get(file_path).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
     // ── Writers ──────────────────────────────────────────────────────────────
 
     /// Store duration from a background probe (no position, no last_played update).
@@ -70,6 +96,35 @@ impl ResumeDb {
         if w > 0 && h > 0 {
             self.resolutions.insert(file_path.to_string(), (w, h));
             trim(&mut self.resolutions);
+        }
+    }
+
+    pub fn record_audio_track(&mut self, file_path: &str, id: i64) {
+        self.audio_tracks.insert(file_path.to_string(), id);
+        trim(&mut self.audio_tracks);
+    }
+
+    pub fn record_sub_track(&mut self, file_path: &str, id: i64) {
+        self.sub_tracks.insert(file_path.to_string(), id);
+        trim(&mut self.sub_tracks);
+    }
+
+    pub fn record_volume(&mut self, file_path: &str, vol: f64) {
+        self.volumes.insert(file_path.to_string(), vol);
+        trim(&mut self.volumes);
+    }
+
+    /// Add a bookmark at `position`. Silently deduplicates within 2 seconds.
+    pub fn add_bookmark(&mut self, file_path: &str, position: f64, label: String) {
+        let list = self.bookmarks.entry(file_path.to_string()).or_default();
+        if list.iter().any(|b| (b.position - position).abs() < 2.0) { return; }
+        let idx = list.partition_point(|b| b.position < position);
+        list.insert(idx, Bookmark { position, label });
+    }
+
+    pub fn remove_bookmark(&mut self, file_path: &str, idx: usize) {
+        if let Some(list) = self.bookmarks.get_mut(file_path) {
+            if idx < list.len() { list.remove(idx); }
         }
     }
 
