@@ -56,6 +56,7 @@ pub enum PlayerEvent {
     Duration(f64),
     FileLoaded,
     EndFile,
+    EofReached(bool),
     Pause(bool),
     Frame(Vec<u8>, u32, u32), // rgba pixels, width, height
     Width(i64),
@@ -218,6 +219,20 @@ impl Player {
             //   Linux   → nvdec-copy / vaapi-copy
             set_opt_str(h, "hwdec", "auto-copy-safe");
 
+            // Live / growing-file support: stay open at EOF so mpv doesn't
+            // fire EndFile prematurely when a recording is still in progress.
+            // keep-open-pause is left at default (yes) so mpv pauses cleanly
+            // at the live edge instead of spinning trying to play nothing.
+            set_opt_str(h, "keep-open", "yes");
+            // Larger demuxer buffer so the reader can sprint far ahead of
+            // the playhead — critical for catching up quickly in live files.
+            // demuxer-readahead-secs is set very high so it's never the
+            // bottleneck; demuxer-max-bytes is the real ceiling (~8–13 min
+            // at typical bitrates, so one End press covers the recording in
+            // far fewer chase steps than with a 60s limit).
+            set_opt_str(h, "demuxer-max-bytes", "500M");
+            set_opt_str(h, "demuxer-readahead-secs", "3600");
+
             let rc = sys::mpv_initialize(h);
             tracing::info!(rc, "mpv_initialize");
             assert_eq!(rc, 0, "mpv_initialize failed: {rc}");
@@ -247,6 +262,7 @@ impl Player {
             observe(h, 26, "loop-playlist", sys::mpv_format_MPV_FORMAT_STRING);
             observe(h, 27, "video-zoom",         sys::mpv_format_MPV_FORMAT_DOUBLE);
             observe(h, 28, "demuxer-cache-time", sys::mpv_format_MPV_FORMAT_DOUBLE);
+            observe(h, 29, "eof-reached", sys::mpv_format_MPV_FORMAT_FLAG);
 
             Self {
                 handle: Arc::new(Handle(h)),
@@ -477,6 +493,13 @@ impl Player {
         command_str(self.handle.0, &format!("add chapter {delta}"));
     }
 
+    /// Seek to a specific absolute timestamp (seconds). Used for live-edge jumps
+    /// where the caller has already computed a safe target from known state.
+    pub fn seek_to(&self, pos: f64) {
+        tracing::debug!(pos, "seek_to");
+        command(self.handle.0, &["seek", &pos.to_string(), "absolute+keyframes"]);
+    }
+
     pub fn open_url(&self, url: &str) {
         command(self.handle.0, &["loadfile", url]);
     }
@@ -686,6 +709,10 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                     ("pause", sys::mpv_format_MPV_FORMAT_FLAG) => {
                         let flag = unsafe { *(prop.data as *const std::os::raw::c_int) };
                         let _ = tx.send(PlayerEvent::Pause(flag != 0));
+                    }
+                    ("eof-reached", sys::mpv_format_MPV_FORMAT_FLAG) => {
+                        let flag = unsafe { *(prop.data as *const std::os::raw::c_int) };
+                        let _ = tx.send(PlayerEvent::EofReached(flag != 0));
                     }
                     ("width", sys::mpv_format_MPV_FORMAT_INT64) => {
                         let v = unsafe { *(prop.data as *const i64) };
@@ -900,6 +927,7 @@ fn init_and_render_loop(
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn command(h: *mut sys::mpv_handle, args: &[&str]) {
+    tracing::debug!(?args, "mpv_command");
     let cstrings: Vec<CString> = args.iter().map(|s| CString::new(*s).unwrap()).collect();
     let mut ptrs: Vec<*const std::os::raw::c_char> = cstrings.iter().map(|s| s.as_ptr()).collect();
     ptrs.push(std::ptr::null());

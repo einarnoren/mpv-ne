@@ -777,6 +777,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             ("I",              "Toggle hardware decoding"),
             ("Ctrl+G",         "Jump to time"),
             ("Ctrl+Scroll",    "Seek ±5 seconds"),
+            ("End",            "Jump to live edge (growing files)"),
             ("Escape",         "Exit fullscreen / close panel"),
             ("?",              "Show / hide this help"),
         ];

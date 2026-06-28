@@ -73,10 +73,17 @@ session, so this represents the full feature history.
 
 ### Seekbar Thumbnails
 - Background thumbnail generation via secondary libmpv instance (no ffmpeg required)
-- Two-pass seeking (fast keyframe + exact) for frame accuracy
-- 30 thumbnails per file, 3 parallel mpv instances
+- Single-pass keyframe seeking (fast; exact pass dropped — quality unchanged)
+- 30 thumbnails per file, single sequential worker (low CPU impact)
+- Incremental extension for growing files (`spawn_extend`) — new frames added without clearing existing ones; throttled to one dispatch per step interval
 - Popup follows cursor along seekbar with timestamp below thumbnail
 - Thumbnail cache keyed by generation ID (no stale frames on file change)
+
+### Live / Growing MKV Support
+- `End` key triggers JumpToLive: rapid seek cascade using demuxer readahead to reach the live edge in ~2 seconds regardless of file length
+- Auto-resume when paused at the live edge: periodic 2-second poke resumes playback as soon as new content is buffered (works around mpv `keep-open=yes` demuxer stall)
+- `eof-reached` property observer for reliable live-edge detection (more reliable than `MPV_EVENT_END_FILE` with `keep-open=yes`)
+- Deferred thumbnail regeneration after each JumpToLive with correct step size for current duration
 
 ### Keyboard Shortcuts
 - Full binding table (`Space`, `F`, `H`, `M`, `[`, `]`, `\`, `J`, `#`, `V`, `I`, `S`, `?`, Ctrl+G, Ctrl+Left/Right, Ctrl+Scroll)

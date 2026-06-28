@@ -1,4 +1,5 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// Only suppress the console window in release builds so debug runs show output.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod media_probe;

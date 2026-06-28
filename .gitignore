@@ -17,6 +17,7 @@ Thumbs.db
 
 # Local dev tools
 .claude/
+.cargo/
 
 # Design assets (local only)
 design/

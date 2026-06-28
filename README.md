@@ -13,7 +13,8 @@ inspired by [PotPlayer](https://potplayer.tv/).
 - Hardware-accelerated video via libmpv (H.264, H.265/HEVC, AV1, VP9, …)
 - Custom dark UI - no OS chrome required
 - **Focus mode** - hide all chrome with `H`, leaving only the video. Controls and top bar fade in on hover
-- Seekbar thumbnail preview
+- Seekbar thumbnail preview (generated in background, no ffmpeg required)
+- **Live/growing MKV support** - designed for active recordings still being written to disk; `End` key jumps to the live edge with automatic catch-up, and playback resumes automatically as new content is buffered
 - Playlist with sort, shuffle, save/load (.m3u)
 - File browser & recent files panels
 - Video equaliser (brightness, contrast, saturation, hue, gamma)
@@ -94,7 +95,6 @@ src/
   opensubs.rs     - OpenSubtitles.com API client
   resume.rs       - resume position & metadata cache
   settings.rs     - persistent settings (TOML)
-  thumbnail.rs    - seekbar preview thumbnails
 assets/           - icons, logo
 mpv-lib/          - mpv.lib import library (not included, see above)
 ```

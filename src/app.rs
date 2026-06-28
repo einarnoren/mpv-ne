@@ -282,6 +282,22 @@ pub struct MpvNe {
     /// whenever it passes B.
     pub ab_loop_a: Option<f64>,
     pub ab_loop_b: Option<f64>,
+    /// True while auto-chasing the live edge after End is pressed.
+    pub live_catching_up: bool,
+    /// The target of the most-recent seek issued during a live chase.
+    /// Used to debounce: we skip a DurationChanged-triggered seek if the
+    /// new target is within 10s of this value (avoids hundreds of seeks
+    /// per End press from rapid DurationChanged events).
+    pub live_last_seek: f64,
+    /// True after EndFile fired while position was at the live edge (keep-open=yes).
+    /// DurationChanged will re-seek forward when new content arrives so the user
+    /// doesn't have to manually press End after every buffer refill.
+    pub live_edge_paused: bool,
+    /// Monotonically-increasing counter for deferred thumbnail generation.
+    /// Each live chase completion increments this; `GenerateThumbnails(id)`
+    /// is a no-op when `id != thumb_pending_id`, so only the last End press
+    /// in a rapid sequence actually spawns thumbnail workers.
+    pub thumb_pending_id: u64,
     /// Window size (logical, video-column width only) saved just before
     /// entering fullscreen so we can restore the exact dimensions on exit.
     pre_fullscreen_w: Option<f32>,
@@ -357,6 +373,10 @@ impl Default for MpvNe {
             recent_files: RecentFiles::load(),
             ab_loop_a: None,
             ab_loop_b: None,
+            live_catching_up: false,
+            live_last_seek: 0.0,
+            live_edge_paused: false,
+            thumb_pending_id: 0,
             pre_fullscreen_w: None,
             pre_fullscreen_h: None,
         }
@@ -378,6 +398,7 @@ pub enum Message {
     DurationChanged(f64),
     FileLoaded,
     EndFile,
+    EofReached(bool),
     PauseChanged(bool),
     FrameReady(Vec<u8>, u32, u32),
     WidthChanged(i64),
@@ -397,6 +418,7 @@ pub enum Message {
     CurrentAidChanged(i64),
     AudioTrackSelected(crate::player::AudioTrack),
     SpeedChanged(f64),
+    LiveEdgeTick,
     // Input
     TogglePause,
     ToggleMute,
@@ -425,6 +447,10 @@ pub enum Message {
     // OSD
     ShowOsd(String),
     ClearOsd(u64),
+    /// Deferred thumbnail generation after a live chase.  The u64 is a
+    /// generation counter — stale requests (from earlier End presses) are
+    /// ignored so only the final chase completion actually spawns workers.
+    GenerateThumbnails(u64),
     // Side panel (playlist / browser / recent / settings)
     TogglePanel(PanelKind),
     #[allow(dead_code)]
@@ -533,6 +559,7 @@ pub enum Message {
     VolumeAdjust(f64),
     #[allow(dead_code)]
     FileDropped(std::path::PathBuf),
+    JumpToLive,
     NextFile,
     PrevFile,
     // Raw input events - resolved through `bindings` in `update`.
@@ -576,11 +603,17 @@ impl MpvNe {
             Message::FileSelected(None) => {}
 
             Message::Stop => {
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
                 self.player.stop();
                 self.current_frame = None;
                 self.stopped = true;
             }
-            Message::Seek(pos) => self.player.seek(pos),
+            Message::Seek(pos) => {
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
+                self.player.seek(pos);
+            }
             Message::VolumeChanged(vol) => {
                 self.player.set_volume(vol);
                 let mut prefs = crate::settings::Settings::load();
@@ -680,11 +713,91 @@ impl MpvNe {
                 // Ignore stale duration events during file transitions.
                 if self.transitioning { return Task::none(); }
 
+                // Live edge chase: each seek causes mpv to read further into
+                // the file, firing more DurationChanged events. Keep seeking
+                // until we're within 8s of the current known edge.
+                if self.live_catching_up {
+                    let gap = dur - self.player.position;
+                    tracing::debug!(
+                        pos = self.player.position,
+                        dur,
+                        gap,
+                        "live chase: gap"
+                    );
+                    if gap > 8.0 {
+                        let target = (dur - 2.0).max(self.player.position);
+                        // Debounce: skip if target is within 10s of the last
+                        // issued seek.  DurationChanged fires many times per
+                        // second, and without this we send hundreds of seeks
+                        // per End press from stale position values.
+                        if target > self.live_last_seek + 10.0 {
+                            self.live_last_seek = target;
+                            self.player.seek_to(target);
+                        }
+                        return Task::none();
+                    } else {
+                        self.live_catching_up = false;
+                        self.live_last_seek = 0.0;
+                        self.thumb_pending_id += 1;
+                        let pending = self.thumb_pending_id;
+                        tracing::info!(pos = self.player.position, dur, "live chase: reached edge");
+                        // Seeking during the chase may leave mpv paused (keep-open=yes
+                        // pauses when it hits the demuxer boundary mid-chase). Always
+                        // resume so the user sees live playback without having to press Space.
+                        self.player.play();
+                        // Defer thumbnail generation by 5s.  If the user keeps
+                        // pressing End, each subsequent completion increments
+                        // thumb_pending_id, making earlier GenerateThumbnails
+                        // messages stale so they no-op when they fire.
+                        return Task::batch([
+                            Task::done(Message::ShowOsd("Live edge".into())),
+                            Task::perform(
+                                async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                    pending
+                                },
+                                Message::GenerateThumbnails,
+                            ),
+                        ]);
+                    }
+                }
+
+                // Auto-resume after being paused at the live edge: if the file
+                // grew by at least 3s past our last position, seek forward to
+                // resume seamlessly without requiring the user to press End.
+                if self.live_edge_paused && dur > self.player.position + 3.0 {
+                    self.live_edge_paused = false;
+                    let target = (dur - 2.0).max(self.player.position);
+                    tracing::debug!(
+                        pos = self.player.position,
+                        dur,
+                        target,
+                        "live_edge_paused: auto-seeking to new content"
+                    );
+                    self.player.seek_to(target);
+                    self.player.play();
+                    return Task::none();
+                }
+
+                // Duration grew significantly beyond what thumbnails currently cover
+                // (e.g. a live file that's still being recorded).  Extend without
+                // clearing existing thumbnails so the user sees no gap.
+                {
+                    let covered = self.thumb_cache.lock().unwrap().covered_to;
+                    if dur > covered + 30.0 {
+                        if let Some(path) = &self.player.path.clone() {
+                            crate::thumbnail::spawn_extend(
+                                path.clone(), dur, self.thumb_cache.clone(),
+                            );
+                        }
+                    }
+                }
+
                 // First real duration after FileLoaded - show OSD + start thumbnails.
                 if dur > 0.0 && !self.file_info_osd_shown {
                     self.file_info_osd_shown = true;
 
-                    // Spawn thumbnails now - path is confirmed correct (not transitioning).
+                    // Spawn thumbnails - path is confirmed correct (not transitioning).
                     if let Some(path) = &self.player.path.clone() {
                         crate::thumbnail::spawn_generate(
                             path.clone(),
@@ -711,6 +824,8 @@ impl MpvNe {
             Message::FileLoaded => {
                 self.stopped = false;
                 self.transitioning = false;
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
                 // Clear AB loop points and video transform when a new file starts.
                 self.ab_loop_a = None;
                 self.ab_loop_b = None;
@@ -727,13 +842,42 @@ impl MpvNe {
                 }
                 } // end resume_enabled
             }
+            Message::EofReached(true) => {
+                // eof-reached fires with keep-open=yes when mpv hits the end of
+                // the current file and pauses on the last frame. Use this as the
+                // reliable live-edge signal instead of EndFile (which may arrive
+                // after the user has already pressed End).
+                if !self.transitioning && self.player.position >= self.player.duration - 5.0 {
+                    self.live_edge_paused = true;
+                    tracing::debug!(
+                        pos = self.player.position,
+                        dur = self.player.duration,
+                        "eof-reached at live edge — will auto-resume when buffered"
+                    );
+                }
+            }
+            Message::EofReached(false) => {}
+            Message::LiveEdgeTick => {
+                // mpv's demuxer doesn't fire DurationChanged while keep-open pauses
+                // at EOF, so we poke play() every 2s. mpv will resume if new content
+                // has been written to the file, or re-pause immediately if not.
+                if self.live_edge_paused && !self.live_catching_up {
+                    tracing::debug!(pos = self.player.position, "live edge: poking play");
+                    self.player.play();
+                }
+            }
             Message::EndFile => {
                 if self.transitioning {
                     // We already saved resume and set the new path before
                     // calling open(); don't touch path/paused here.
                 } else {
+                    tracing::info!(
+                        pos = self.player.position,
+                        dur = self.player.duration,
+                        path = ?self.player.path,
+                        "EndFile"
+                    );
                     self.save_resume();
-                    // After-playback action.
                     match self.after_playback {
                         AfterPlayback::NextFile => {
                             if self.playlist_idx + 1 < self.playlist.len() {
@@ -742,12 +886,15 @@ impl MpvNe {
                                 self.open_next(p.to_string_lossy().into_owned());
                                 return Task::none();
                             }
+                            // No next file — fall through to keep-open behaviour.
+                            self.player.paused = true;
                         }
                         AfterPlayback::LoopFile => {
                             if let Some(path) = self.player.path.clone() {
                                 self.open_next(path);
                                 return Task::none();
                             }
+                            self.player.paused = true;
                         }
                         AfterPlayback::ClosePlayer => {
                             if let Some(id) = self.window_id {
@@ -755,12 +902,26 @@ impl MpvNe {
                                 return iced::window::close(id);
                             }
                         }
-                        AfterPlayback::DoNothing => {}
+                        AfterPlayback::DoNothing => {
+                            // With keep-open=yes, mpv stays loaded at the last
+                            // frame. Keep path / current_frame intact so the user
+                            // can seek back or press End to re-chase a live recording.
+                            self.live_catching_up = false;
+                            self.player.paused = true;
+                            // If we hit the end while close to the known duration,
+                            // this is likely a live/growing file. Set the flag so
+                            // DurationChanged can auto-seek forward when new content
+                            // arrives, giving seamless DVR-style catch-up.
+                            if self.player.position >= self.player.duration - 5.0 {
+                                self.live_edge_paused = true;
+                                tracing::debug!(
+                                    pos = self.player.position,
+                                    dur = self.player.duration,
+                                    "EndFile at live edge — will auto-resume when buffered"
+                                );
+                            }
+                        }
                     }
-                    self.player.paused = true;
-                    self.player.path = None;
-                    self.player.position = 0.0;
-                    self.current_frame = None;
                 }
             }
             Message::MetadataProbed(path, size, dur) => {
@@ -804,7 +965,10 @@ impl MpvNe {
                 );
             }
             Message::SetAfterPlayback(a) => self.after_playback = a,
-            Message::PauseChanged(p) => self.player.paused = p,
+            Message::PauseChanged(p) => {
+                tracing::debug!(paused = p, pos = self.player.position, dur = self.player.duration, "PauseChanged");
+                self.player.paused = p;
+            }
 
             Message::FrameReady(pixels, w, h) => {
                 if self.stopped {
@@ -900,6 +1064,15 @@ impl MpvNe {
             Message::ClearOsd(seq) => {
                 if seq == self.osd_seq {
                     self.osd_message.clear();
+                }
+            }
+            Message::GenerateThumbnails(id) => {
+                if id != self.thumb_pending_id { return Task::none(); }
+                if let Some(path) = &self.player.path.clone() {
+                    tracing::debug!(dur = self.player.duration, "thumbnail: deferred generate");
+                    crate::thumbnail::spawn_generate(
+                        path.clone(), self.player.duration, self.thumb_cache.clone(),
+                    );
                 }
             }
 
@@ -1513,6 +1686,8 @@ impl MpvNe {
                     self.stopped = false;
                     self.player.play();
                 } else {
+                    // User explicitly paused — stop the live-edge auto-resume loop.
+                    self.live_edge_paused = false;
                     self.player.pause();
                 }
             }
@@ -1689,7 +1864,36 @@ impl MpvNe {
                     return Task::batch(tasks);
                 }
             }
-            Message::SeekRelative(delta) => self.player.seek_relative(delta),
+            Message::SeekRelative(delta) => {
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
+                self.player.seek_relative(delta);
+            }
+            Message::JumpToLive => {
+                if self.player.duration < 1.0 {
+                    tracing::warn!(
+                        duration = self.player.duration,
+                        "JumpToLive: duration unknown, nothing to do"
+                    );
+                    return Task::none();
+                }
+                // Start chasing: seek to current known end. DurationChanged will
+                // keep seeking forward as mpv reads further into the file, until
+                // position is within 8s of the known duration.
+                self.live_catching_up = true;
+                self.live_last_seek = 0.0;
+                self.live_edge_paused = false;
+                let target = (self.player.duration - 2.0).max(self.player.position);
+                tracing::info!(
+                    pos  = self.player.position,
+                    dur  = self.player.duration,
+                    gap  = self.player.duration - self.player.position,
+                    target,
+                    "JumpToLive: starting chase"
+                );
+                self.player.seek_to(target);
+                return Task::done(Message::ShowOsd("Catching up to live edge…".into()));
+            }
             Message::VolumeAdjust(delta) => {
                 self.player.set_volume(self.player.volume + delta);
                 let mut prefs = crate::settings::Settings::load();
@@ -1748,6 +1952,9 @@ impl MpvNe {
                         return Task::done(Message::ToggleChrome);
                     }
                     return Task::none();
+                }
+                if name == "end" {
+                    return Task::done(Message::JumpToLive);
                 }
                 if let Some(action) = self.bindings.keys.get(&name).copied() {
                     return Task::done(action_to_message(action));
@@ -2148,10 +2355,20 @@ impl MpvNe {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subs: Vec<Subscription<Message>> = vec![
             Subscription::run_with(self.player.stream_key(), mpv_stream),
             iced::event::listen_with(on_window_event),
-        ])
+        ];
+        // While paused at the live edge, mpv's demuxer stops firing DurationChanged.
+        // Poll every 2 seconds and poke play() so mpv resumes automatically once
+        // new content is available.
+        if self.live_edge_paused {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(2))
+                    .map(|_| Message::LiveEdgeTick),
+            );
+        }
+        Subscription::batch(subs)
     }
 }
 
@@ -2370,6 +2587,7 @@ fn key_to_name(key: &iced::keyboard::Key) -> Option<String> {
         Key::Named(Named::ArrowDown) => "down".into(),
         Key::Named(Named::PageUp) => "pageup".into(),
         Key::Named(Named::PageDown) => "pagedown".into(),
+        Key::Named(Named::End) => "end".into(),
         Key::Named(Named::Escape) => "escape".into(),
         Key::Named(Named::Enter) => "enter".into(),
         Key::Named(Named::Tab) => "tab".into(),
@@ -2388,6 +2606,7 @@ fn mpv_stream(key: &StreamKey) -> BoxStream<'static, Message> {
         PlayerEvent::Duration(d) => Message::DurationChanged(d),
         PlayerEvent::FileLoaded => Message::FileLoaded,
         PlayerEvent::EndFile => Message::EndFile,
+        PlayerEvent::EofReached(v) => Message::EofReached(v),
         PlayerEvent::Pause(p) => Message::PauseChanged(p),
         PlayerEvent::Frame(px, w, h) => Message::FrameReady(px, w, h),
         PlayerEvent::Width(w) => Message::WidthChanged(w),
