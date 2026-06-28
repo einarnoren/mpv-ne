@@ -79,7 +79,7 @@ session, so this represents the full feature history.
 - Popup follows cursor along seekbar with timestamp below thumbnail
 - Thumbnail cache keyed by generation ID (no stale frames on file change)
 
-### Live / Growing MKV Support
+### Live / Growing File Support
 - `End` key triggers JumpToLive: rapid seek cascade using demuxer readahead to reach the live edge in ~2 seconds regardless of file length
 - Auto-resume when paused at the live edge: periodic 2-second poke resumes playback as soon as new content is buffered (works around mpv `keep-open=yes` demuxer stall)
 - `eof-reached` property observer for reliable live-edge detection (more reliable than `MPV_EVENT_END_FILE` with `keep-open=yes`)

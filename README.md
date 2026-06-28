@@ -14,7 +14,7 @@ inspired by [PotPlayer](https://potplayer.tv/).
 - Custom dark UI - no OS chrome required
 - **Focus mode** - hide all chrome with `H`, leaving only the video. Controls and top bar fade in on hover
 - Seekbar thumbnail preview (generated in background, no ffmpeg required)
-- **Live/growing MKV support** - designed for active recordings still being written to disk; `End` key jumps to the live edge with automatic catch-up, and playback resumes automatically as new content is buffered
+- **Live/growing file support** - designed for active recordings still being written to disk; `End` key jumps to the live edge with automatic catch-up, and playback resumes automatically as new content is buffered. Works with any format mpv can stream (MKV, TS, fragmented MP4, …)
 - Playlist with sort, shuffle, save/load (.m3u)
 - File browser & recent files panels
 - Video equaliser (brightness, contrast, saturation, hue, gamma)
