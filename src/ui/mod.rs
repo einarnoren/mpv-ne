@@ -109,66 +109,6 @@ pub fn fmt_duration(secs: f64) -> String {
     }
 }
 
-/// Builds the shared tab bar + content area shown in the docked side panel.
-fn panels_popup(app: &MpvNe) -> Element<'_, Message> {
-    fn panel_btn<'a>(
-        label: &'static str,
-        icon: iced::widget::Svg<'a>,
-        kind: PanelKind,
-        app: &MpvNe,
-    ) -> Element<'a, Message> {
-        let active = app.active_panel == Some(kind);
-        let fg = if active { AURORA_TEAL } else { TEXT_BRIGHT };
-        button(
-            row![icon, text(label).size(13).color(fg)]
-                .spacing(10)
-                .align_y(iced::Alignment::Center),
-        )
-        .padding([8, 14])
-        .width(Length::Fill)
-        .style(move |_, status| {
-            use iced::widget::button::Status;
-            let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => if active { BG_BUTTON } else { BG_DEEPEST },
-            };
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::Border {
-                    color: if active { iced::Color { a: 0.3, ..AURORA_TEAL } } else { iced::Color::TRANSPARENT },
-                    width: if active { 1.0 } else { 0.0 },
-                    radius: iced::border::Radius::new(4.0),
-                },
-                ..Default::default()
-            }
-        })
-        .on_press(Message::TogglePanel(kind))
-        .into()
-    }
-
-    container(
-        column![
-            panel_btn("Playlist",  icons::list_music(),  PanelKind::Playlist,  app),
-            panel_btn("Browser",   icons::folder_tree(), PanelKind::Browser,   app),
-            panel_btn("Recent",    icons::history(),     PanelKind::Recent,    app),
-            panel_btn("Settings",  icons::sliders(),     PanelKind::Settings,  app),
-        ]
-        .spacing(2)
-        .width(Length::Fixed(180.0)),
-    )
-    .padding(6)
-    .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
-        border: iced::Border {
-            radius: iced::border::Radius::new(6.0),
-            width: 1.0,
-            color: iced::Color::from_rgb(0.18, 0.20, 0.24),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
 fn tabbed_panel(app: &MpvNe, active: PanelKind) -> Element<'_, Message> {
     // Tab definitions: (label, kind).
     const TABS: &[(&str, PanelKind)] = &[
@@ -580,26 +520,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         with_osd
     };
 
-    // Panels picker popup - rendered at full window level so position is
-    // consistent whether or not a side panel is open.
-    let with_panels_popup: Element<'_, Message> = if app.panels_menu_open {
-        let px = (app.popup_anchor_x - 90.0)
-            .clamp(4.0, (app.window_w_logical - 184.0).max(4.0));
-        let backdrop = mouse_area(
-            Space::new().width(Length::Fill).height(Length::Fill)
-        ).on_press(Message::TogglePanelsMenu);
-        let anchored = column![
-            Space::new().height(Length::Fill),
-            row![Space::new().width(Length::Fixed(px)), panels_popup(app)],
-            Space::new().height(Length::Fixed(bar_h + 8.0)),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
-        stack![with_ctx_menu, backdrop, anchored]
-            .width(Length::Fill).height(Length::Fill).into()
-    } else {
-        with_ctx_menu
-    };
+    // Panels are toggled directly from the panels button (last-used panel),
+    // with switching via the tab bar — no picker popup.
+    let with_panels_popup: Element<'_, Message> = with_ctx_menu;
 
     let with_modal: Element<'_, Message> = if let Some(modal) = &app.modal {
         let dialog = container(

@@ -301,8 +301,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
     // AB repeat button. Cycles: idle -> A set -> A+B set (looping) -> clear.
 
-    // Single panels menu button replacing 4 individual panel buttons.
-    let panel_active = app.active_panel.is_some() || app.panels_menu_open;
+    // Panels button: toggles the last-used side panel; tabs switch within it.
+    let panel_active = app.active_panel.is_some();
     let panels_btn = icons::tipped(
         icons::square_toggle(icons::panels_menu(), panel_active, AURORA_TEAL)
             .on_press(Message::TogglePanelsMenu),

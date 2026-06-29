@@ -299,7 +299,6 @@ pub struct MpvNe {
     /// Used to anchor the popup above whichever button was clicked.
     pub popup_anchor_x: f32,
     pub playlist_sort_open: bool,
-    pub panels_menu_open: bool,
     /// Context menu for file entries in panels.
     pub file_context_menu: Option<FileContextMenu>,
     /// Current OSD message. Empty string means nothing is shown.
@@ -427,7 +426,6 @@ impl Default for MpvNe {
             audio_menu_open: false,
             popup_anchor_x: 0.0,
             playlist_sort_open: false,
-            panels_menu_open: false,
             file_context_menu: None,
             osd_message: String::new(),
             osd_seq: 0,
@@ -2164,13 +2162,12 @@ impl MpvNe {
                 // Escape closes other popups.
                 if name == "escape"
                     && (self.subs_menu_open || self.fit_menu_open
-                        || self.audio_menu_open || self.panels_menu_open
+                        || self.audio_menu_open
                         || self.active_panel.is_some())
                 {
                     self.subs_menu_open = false;
                     self.fit_menu_open = false;
                     self.audio_menu_open = false;
-                    self.panels_menu_open = false;
                     if self.active_panel.is_some() {
                         return self.toggle_panel(None);
                     }
@@ -2430,7 +2427,6 @@ impl MpvNe {
     /// only when the panel transitions between open and closed (not when
     /// switching between panel kinds, which keeps the same width).
     fn toggle_panel(&mut self, kind: Option<PanelKind>) -> Task<Message> {
-        self.panels_menu_open = false; // always close the picker when a panel is toggled
         let was_open = self.active_panel.is_some();
 
         match kind {

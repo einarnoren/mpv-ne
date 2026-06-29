@@ -189,42 +189,6 @@ pub fn pin_active<'a>() -> Svg<'a> {
     pin()
 }
 
-// History/clock icon for the recent files panel (Lucide history).
-pub fn history<'a>() -> Svg<'a> {
-    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
-}
-
-// List-music icon for the playlist panel toggle (Lucide list-music).
-pub fn list_music<'a>() -> Svg<'a> {
-    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15V6"/><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
-}
-
-// Folder-tree icon for the browser panel (Lucide folder-tree).
-pub fn folder_tree<'a>() -> Svg<'a> {
-    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.88-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1z"/><path d="M3 5v14"/><path d="M3 7h5"/><path d="M3 17h5"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
-}
-
-// Sliders icon for the playback settings window toggle.
-pub fn sliders<'a>() -> Svg<'a> {
-    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="2" x2="6" y1="14" y2="14"/><line x1="10" x2="14" y1="8" y2="8"/><line x1="18" x2="22" y1="16" y2="16"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
-}
-
 // Audio track picker - Lucide "music" note icon, consistent with captions style.
 pub fn audio_tracks<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></g>"##;
