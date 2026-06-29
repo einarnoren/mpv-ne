@@ -296,6 +296,21 @@ pub struct MpvNe {
     /// DurationChanged will re-seek forward when new content arrives so the user
     /// doesn't have to manually press End after every buffer refill.
     pub live_edge_paused: bool,
+    /// File-size-based duration estimate for growing files. Updated every few
+    /// seconds by reading the file size from disk and extrapolating from the
+    /// known bitrate. Zero when unknown. Used so the seekbar and JumpToLive
+    /// reflect the true extent of a long recording without mpv having to index
+    /// the whole file first.
+    pub size_est_duration: f64,
+    /// Reference point for the size estimate: the file size and mpv-known
+    /// duration at the time we last sampled them together.
+    pub size_ref_size: u64,
+    pub size_ref_duration: f64,
+    /// Floor for the displayed duration, set by the container byte-rate probe on
+    /// load. mpv reports its own slowly-climbing forward-index duration which
+    /// would otherwise stomp the probed full extent and make the seekbar flicker
+    /// back to a tiny value; DurationChanged never drops below this.
+    pub probed_duration: f64,
     /// Monotonically-increasing counter for deferred thumbnail generation.
     /// Each live chase completion increments this; `GenerateThumbnails(id)`
     /// is a no-op when `id != thumb_pending_id`, so only the last End press
@@ -379,6 +394,10 @@ impl Default for MpvNe {
             live_catching_up: false,
             live_last_seek: 0.0,
             live_edge_paused: false,
+            size_est_duration: 0.0,
+            size_ref_size: 0,
+            size_ref_duration: 0.0,
+            probed_duration: 0.0,
             thumb_pending_id: 0,
             pre_fullscreen_w: None,
             pre_fullscreen_h: None,
@@ -422,6 +441,7 @@ pub enum Message {
     AudioTrackSelected(crate::player::AudioTrack),
     SpeedChanged(f64),
     LiveEdgeTick,
+    FileSizeTick,
     AddBookmark,
     RemoveBookmark(usize),
     JumpToBookmark(f64),
@@ -478,6 +498,8 @@ pub enum Message {
     AudioDelayChanged(f64),
     TakeScreenshot,
     // Loop / deinterlace toggles
+    /// True duration probed from container header/tail for the currently-loaded file.
+    LiveDurationProbed(f64),
     /// Background probe results.
     #[allow(dead_code)]
     MetadataProbed(std::path::PathBuf, u64, Option<f64>),
@@ -719,9 +741,23 @@ impl MpvNe {
                 }
             }
             Message::DurationChanged(dur) => {
-                self.player.duration = dur;
+                // Never drop below the probed full extent — mpv's forward-index
+                // duration climbs from a small value and would otherwise stomp it.
+                self.player.duration = dur.max(self.probed_duration);
                 // Ignore stale duration events during file transitions.
                 if self.transitioning { return Task::none(); }
+
+                // Keep a reference point for file-size-based duration extrapolation.
+                // Update whenever mpv gives us a stable, meaningful duration so the
+                // FileSizeTick can compute how many bytes per second the recording uses.
+                if dur > 30.0 && dur > self.size_ref_duration {
+                    if let Some(path) = &self.player.path.clone() {
+                        if let Ok(meta) = std::fs::metadata(path) {
+                            self.size_ref_size = meta.len();
+                            self.size_ref_duration = dur;
+                        }
+                    }
+                }
 
                 // Live edge chase: each seek causes mpv to read further into
                 // the file, firing more DurationChanged events. Keep seeking
@@ -836,6 +872,10 @@ impl MpvNe {
                 self.transitioning = false;
                 self.live_catching_up = false;
                 self.live_edge_paused = false;
+                self.size_est_duration = 0.0;
+                self.size_ref_size = 0;
+                self.size_ref_duration = 0.0;
+                self.probed_duration = 0.0;
                 // Clear AB loop points and video transform when a new file starts.
                 self.ab_loop_a = None;
                 self.ab_loop_b = None;
@@ -855,14 +895,31 @@ impl MpvNe {
                         self.player.set_sub_track(sid);
                     }
                 }
+                // Kick off a background header/tail probe to discover the true
+                // duration immediately — without this, mpv only knows about the
+                // first demuxer-buffer-worth of the file (~15 min at 5 Mbps).
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+                if let Some(path) = self.player.path.clone() {
+                    tasks.push(Task::perform(
+                        async move {
+                            crate::media_probe::probe_duration(std::path::Path::new(&path)).unwrap_or(0.0)
+                        },
+                        |dur| if dur > 0.0 {
+                            Message::LiveDurationProbed(dur)
+                        } else {
+                            Message::LiveDurationProbed(0.0)
+                        },
+                    ));
+                }
                 // Check for a saved resume position and seek to it (if enabled).
                 if self.resume_enabled {
                 if let Some(path) = &self.player.path.clone() {
                     if let Some(pos) = self.resume_db.get(path) {
-                        return Task::done(Message::ResumePosition(pos));
+                        tasks.push(Task::done(Message::ResumePosition(pos)));
                     }
                 }
                 } // end resume_enabled
+                if !tasks.is_empty() { return Task::batch(tasks); }
             }
             Message::EofReached(true) => {
                 // eof-reached fires with keep-open=yes when mpv hits the end of
@@ -906,11 +963,40 @@ impl MpvNe {
             }
             Message::LiveEdgeTick => {
                 // mpv's demuxer doesn't fire DurationChanged while keep-open pauses
-                // at EOF, so we poke play() every 2s. mpv will resume if new content
-                // has been written to the file, or re-pause immediately if not.
-                if self.live_edge_paused && !self.live_catching_up {
-                    tracing::debug!(pos = self.player.position, "live edge: poking play");
+                // at EOF. Poke play() so mpv resumes reading — it will fire
+                // DurationChanged if more content exists (letting the chase continue),
+                // or re-pause immediately if we're truly at the live edge.
+                if self.live_edge_paused {
+                    tracing::debug!(
+                        pos = self.player.position,
+                        chasing = self.live_catching_up,
+                        "live edge: poking play"
+                    );
                     self.player.play();
+                }
+            }
+            Message::FileSizeTick => {
+                // Periodically read the file size from disk and extrapolate a
+                // duration estimate so the seekbar reflects the true extent of a
+                // growing recording without mpv having to index the whole file.
+                if let Some(path) = &self.player.path.clone() {
+                    if self.size_ref_size > 0 && self.size_ref_duration > 10.0 {
+                        if let Ok(meta) = std::fs::metadata(path) {
+                            let current_size = meta.len();
+                            if current_size > self.size_ref_size {
+                                let est = self.size_ref_duration
+                                    * (current_size as f64 / self.size_ref_size as f64);
+                                if est > self.size_est_duration {
+                                    self.size_est_duration = est;
+                                    // Update player.duration so the seekbar and all
+                                    // duration-dependent logic sees the full extent.
+                                    if est > self.player.duration {
+                                        self.player.duration = est;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             Message::EndFile => {
@@ -950,22 +1036,51 @@ impl MpvNe {
                             }
                         }
                         AfterPlayback::DoNothing => {
-                            // With keep-open=yes, mpv stays loaded at the last
-                            // frame. Keep path / current_frame intact so the user
-                            // can seek back or press End to re-chase a live recording.
-                            self.live_catching_up = false;
+                            // With keep-open=yes, mpv stays loaded at the last frame.
                             self.player.paused = true;
-                            // If we hit the end while close to the known duration,
-                            // this is likely a live/growing file. Set the flag so
-                            // DurationChanged can auto-seek forward when new content
-                            // arrives, giving seamless DVR-style catch-up.
-                            if self.player.position >= self.player.duration - 5.0 {
-                                self.live_edge_paused = true;
+                            self.live_edge_paused = true;
+                            if self.live_catching_up {
+                                // Chase is in progress — don't wait for the 2s tick.
+                                // Immediately poke play() so mpv resumes reading the
+                                // file and fires more DurationChanged events. Each EOF
+                                // during a chase means mpv exhausted its demuxer buffer;
+                                // play() lets it read the next chunk right away.
+                                tracing::debug!(
+                                    pos = self.player.position,
+                                    dur = self.player.duration,
+                                    "EndFile during chase — immediately continuing"
+                                );
+                                self.player.play();
+                            } else {
                                 tracing::debug!(
                                     pos = self.player.position,
                                     dur = self.player.duration,
                                     "EndFile at live edge — will auto-resume when buffered"
                                 );
+                            }
+                        }
+                    }
+                }
+            }
+            Message::LiveDurationProbed(dur) => {
+                // Update duration from the container byte-rate probe so the
+                // seekbar shows the full file extent immediately on load,
+                // without mpv having to index the entire file.
+                if dur > self.player.duration {
+                    tracing::debug!(
+                        probed = dur,
+                        mpv = self.player.duration,
+                        "LiveDurationProbed: updating duration from probe"
+                    );
+                    self.player.duration = dur;
+                    // Remember as a floor so later mpv DurationChanged events
+                    // (which start small) can't pull the seekbar back down.
+                    self.probed_duration = dur;
+                    self.size_ref_duration = dur;
+                    if self.size_ref_size == 0 {
+                        if let Some(path) = &self.player.path {
+                            if let Ok(meta) = std::fs::metadata(path) {
+                                self.size_ref_size = meta.len();
                             }
                         }
                     }
@@ -1932,21 +2047,22 @@ impl MpvNe {
                     );
                     return Task::none();
                 }
-                // Start chasing: seek to current known end. DurationChanged will
-                // keep seeking forward as mpv reads further into the file, until
-                // position is within 8s of the known duration.
+                // Phase 1: instant jump to 100% of what mpv has indexed so far.
+                // For a file mpv fully knows, this lands at the live edge immediately.
+                // Phase 2: DurationChanged-chase continues from here — as mpv reads
+                // beyond the indexed portion it fires DurationChanged events, and we
+                // keep seeking forward until the gap is < 8s. This handles the common
+                // case where a growing file is longer than mpv's current index
+                // (e.g. a 1.5h recording where only the first 11 min are indexed).
                 self.live_catching_up = true;
-                self.live_last_seek = 0.0;
-                self.live_edge_paused = false;
-                let target = (self.player.duration - 2.0).max(self.player.position);
+                self.live_last_seek = self.player.duration;
+                self.live_edge_paused = true;
                 tracing::info!(
-                    pos  = self.player.position,
-                    dur  = self.player.duration,
-                    gap  = self.player.duration - self.player.position,
-                    target,
-                    "JumpToLive: starting chase"
+                    pos = self.player.position,
+                    dur = self.player.duration,
+                    "JumpToLive: instant jump + chase"
                 );
-                self.player.seek_to(target);
+                self.player.seek_to_end();
                 return Task::done(Message::ShowOsd("Catching up to live edge…".into()));
             }
             Message::VolumeAdjust(delta) => {
@@ -2424,6 +2540,14 @@ impl MpvNe {
             subs.push(
                 iced::time::every(std::time::Duration::from_secs(2))
                     .map(|_| Message::LiveEdgeTick),
+            );
+        }
+        // Poll file size every 3s while a file is loaded so we can extrapolate
+        // the true duration of a growing recording without mpv indexing it all.
+        if self.player.path.is_some() && !self.stopped {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(3))
+                    .map(|_| Message::FileSizeTick),
             );
         }
         Subscription::batch(subs)

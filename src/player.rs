@@ -500,6 +500,12 @@ impl Player {
         command(self.handle.0, &["seek", &pos.to_string(), "absolute+keyframes"]);
     }
 
+    /// Jump to the very end of the file in one seek using mpv's index.
+    /// Works instantly for files of any length — no incremental chase needed.
+    pub fn seek_to_end(&self) {
+        command(self.handle.0, &["seek", "100", "absolute-percent+keyframes"]);
+    }
+
     pub fn open_url(&self, url: &str) {
         command(self.handle.0, &["loadfile", url]);
     }
