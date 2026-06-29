@@ -6,6 +6,36 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.2.0] — Unreleased
+
+### Live / Growing File Support
+- **Full duration shown on load** — a lightweight container byte-rate probe scans
+  cluster boundaries at the front and tail of the file, measures the byte-rate
+  across nearly the whole file, and extrapolates the true duration. The seekbar
+  reflects the real extent of a long recording immediately, without mpv having to
+  index the whole file. Falls back to the header `Duration` when present.
+- Probed duration acts as a floor so mpv's slowly-climbing forward-index duration
+  can no longer pull the seekbar back down (fixes a flicker on load).
+- Faster, more reliable live-edge catch-up via an instant `seek 100` plus a
+  duration-driven chase to the true edge.
+- Broadened from MKV-only to any format mpv can stream (MKV, TS, fragmented MP4, …).
+
+### Per-File Memory
+- Remembers audio track, subtitle track, and volume per file.
+- Named bookmarks (timestamps) stored per file.
+
+### Window Behaviour
+- Reworked snap-to-edge: easier to pull a window off an edge, with no false
+  re-snapping on diagonal drags or when sliding along an edge.
+
+### Fixes
+- Fixed EBML variable-length integer decoding (it counted leading zeros on a
+  widened integer instead of the byte), which had been corrupting all MKV
+  cluster/header parsing.
+- Suppressed speed/volume OSD messages on startup.
+
+---
+
 ## [0.1.0] — Initial Release
 
 ### Core Player

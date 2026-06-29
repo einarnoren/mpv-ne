@@ -130,7 +130,7 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 
 ## Version
 
-0.1.0 - initial public release
+0.2.0 - see [CHANGELOG](CHANGELOG.md)
 
 ## Licence
 
