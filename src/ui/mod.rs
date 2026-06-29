@@ -251,6 +251,62 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind) -> Element<'_, Message> {
         .into()
 }
 
+/// Overlay the playback stats panel (top-right) on top of `base`.
+fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Message> {
+    let p = &app.player;
+    let s = &app.stats;
+
+    let line = |label: &str, value: String| -> Element<'a, Message> {
+        row![
+            text(label.to_string()).size(12).color(TEXT_MUTED).width(Length::Fixed(86.0)),
+            text(value).size(12).color(TEXT_BRIGHT),
+        ]
+        .into()
+    };
+
+    let res = if p.width > 0 && p.height > 0 {
+        format!("{}×{}", p.width, p.height)
+    } else {
+        "—".into()
+    };
+    let vcodec = if p.video_codec.is_empty() { "—".into() } else { p.video_codec.clone() };
+    let acodec = if p.audio_codec.is_empty() { "—".into() } else { p.audio_codec.clone() };
+    let hwdec = if p.hwdec.is_empty() || p.hwdec == "no" { "software".into() } else { p.hwdec.clone() };
+
+    let body = column![
+        text("Stats").size(13).color(AURORA_TEAL),
+        line("Resolution", res),
+        line("Video", format!("{}  {:.2} Mb/s", vcodec, s.video_bitrate / 1_000_000.0)),
+        line("Audio", format!("{} {}ch  {:.0} kb/s", acodec, p.audio_channels, s.audio_bitrate / 1_000.0)),
+        line("FPS", format!("{:.3} → {:.2}", s.container_fps, s.estimated_fps)),
+        line("Dropped", format!("{}", s.dropped_frames)),
+        line("A/V sync", format!("{:+.3} s", s.avsync)),
+        line("Buffer", format!("{:.1} s ahead", s.cache_duration)),
+        line("Decode", hwdec),
+    ]
+    .spacing(3);
+
+    let panel = container(body)
+        .padding([10, 14])
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.72))),
+            border: Border {
+                radius: iced::border::Radius::new(6.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+    let layer = container(panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Right)
+        .align_y(Vertical::Top)
+        .padding(Padding { top: 54.0, right: 16.0, left: 0.0, bottom: 0.0 });
+
+    stack![base, layer].width(Length::Fill).height(Length::Fill).into()
+}
+
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Player column: top bar + video + controls. When the settings panel is
     // docked this column shrinks to give the panel its fixed slice of space.
@@ -420,6 +476,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    };
+
+    // Stats overlay (top-right): bitrate / fps / dropped frames / buffer.
+    // Toggled with the S key; polled on a timer while visible.
+    let with_osd: Element<'_, Message> = if app.show_stats {
+        stack_stats(app, with_osd)
+    } else {
+        with_osd
     };
 
     // Modal dialog overlay - rendered on top of everything.

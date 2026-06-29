@@ -186,14 +186,39 @@ fn probe_mkv_bitrate(path: &Path, timecode_scale: f64) -> Option<f64> {
     }
 
     let window = 32 * 1024 * 1024u64; // 32 MB per scan
-    let mut clusters: Vec<(u64, u64)> = Vec::new();
-    scan_window(&mut f, 0, window as usize, &mut clusters);
-    if file_len > window {
-        let tail_start = file_len - window;
-        scan_window(&mut f, tail_start, window as usize, &mut clusters);
-    }
 
-    // Earliest and latest cluster by timestamp across both windows.
+    // The front window is dense and reliable — clusters sit right after the
+    // header and are contiguous, so they establish a trustworthy byte-rate.
+    let mut front: Vec<(u64, u64)> = Vec::new();
+    scan_window(&mut f, 0, window as usize, &mut front);
+    front.sort_by_key(|&(b, _)| b);
+    if front.len() < 2 { return None; }
+    let (bf0, tf0) = *front.first().unwrap();
+    let (bf1, tf1) = *front.last().unwrap();
+    if bf1 <= bf0 || tf1 <= tf0 { return None; }
+
+    let ticks_to_secs = |ticks: u64| ticks as f64 * timecode_scale / 1_000_000_000.0;
+    // Reference rate from the front window only — immune to spurious tail matches.
+    let ref_bps = (bf1 - bf0) as f64 / (ticks_to_secs(tf1) - ticks_to_secs(tf0));
+    if ref_bps <= 0.0 { return None; }
+
+    // Predict a cluster's timestamp from its byte offset using the front rate.
+    // A genuine cluster lands near this line; a spurious 4-byte magic match in
+    // random video data produces a wildly inconsistent timestamp (off by orders
+    // of magnitude), so we reject anything more than 3× off the prediction.
+    let plausible = |b: u64, t: u64| -> bool {
+        let predicted = ticks_to_secs(tf0) + (b.saturating_sub(bf0)) as f64 / ref_bps;
+        let actual = ticks_to_secs(t);
+        actual <= predicted * 3.0 + 60.0 && actual + 60.0 >= predicted / 3.0
+    };
+
+    // Gather all clusters (front + tail), keep only those consistent with the
+    // front rate, and take the latest survivor as the end reference.
+    let mut clusters = front;
+    if file_len > window {
+        scan_window(&mut f, file_len - window, window as usize, &mut clusters);
+    }
+    clusters.retain(|&(b, t)| plausible(b, t));
     clusters.sort_by_key(|&(_, t)| t);
 
     if clusters.len() < 2 { return None; }
@@ -201,7 +226,6 @@ fn probe_mkv_bitrate(path: &Path, timecode_scale: f64) -> Option<f64> {
     let (b_last,  t_last)  = *clusters.last().unwrap();
     if b_last <= b_first || t_last <= t_first { return None; }
 
-    let ticks_to_secs = |ticks: u64| ticks as f64 * timecode_scale / 1_000_000_000.0;
     let secs_first = ticks_to_secs(t_first);
     let secs_last  = ticks_to_secs(t_last);
     let bytes_per_sec = (b_last - b_first) as f64 / (secs_last - secs_first);

@@ -50,6 +50,26 @@ impl std::fmt::Display for AudioTrack {
     }
 }
 
+/// Snapshot of the fast-changing playback stats shown in the stats overlay.
+/// Read on demand via [`Player::stats`]; not observed (they change per frame).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlayerStats {
+    /// Current video bitrate in bits/sec.
+    pub video_bitrate: f64,
+    /// Current audio bitrate in bits/sec.
+    pub audio_bitrate: f64,
+    /// Nominal container frame rate (falls back to the estimate).
+    pub container_fps: f64,
+    /// mpv's measured display frame rate.
+    pub estimated_fps: f64,
+    /// Total dropped frames (output + decoder).
+    pub dropped_frames: i64,
+    /// Audio/video sync offset in seconds.
+    pub avsync: f64,
+    /// Seconds of demuxer cache buffered ahead.
+    pub cache_duration: f64,
+}
+
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Position(f64),
@@ -504,6 +524,24 @@ impl Player {
     /// Works instantly for files of any length — no incremental chase needed.
     pub fn seek_to_end(&self) {
         command(self.handle.0, &["seek", "100", "absolute-percent+keyframes"]);
+    }
+
+    /// One-shot read of the dynamic playback stats for the stats overlay.
+    /// These change every frame, so we poll them on demand rather than observe.
+    pub fn stats(&self) -> PlayerStats {
+        let h = self.handle.0;
+        PlayerStats {
+            video_bitrate: get_prop_f64(h, "video-bitrate").unwrap_or(0.0),
+            audio_bitrate: get_prop_f64(h, "audio-bitrate").unwrap_or(0.0),
+            container_fps: get_prop_f64(h, "container-fps")
+                .or_else(|| get_prop_f64(h, "estimated-vf-fps"))
+                .unwrap_or(0.0),
+            estimated_fps: get_prop_f64(h, "estimated-vf-fps").unwrap_or(0.0),
+            dropped_frames: get_prop_i64(h, "frame-drop-count")
+                + get_prop_i64(h, "decoder-frame-drop-count"),
+            avsync: get_prop_f64(h, "avsync").unwrap_or(0.0),
+            cache_duration: get_prop_f64(h, "demuxer-cache-duration").unwrap_or(0.0),
+        }
     }
 
     pub fn open_url(&self, url: &str) {

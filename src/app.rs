@@ -97,6 +97,7 @@ pub enum Action {
     NextFile,
     OpenFile,
     AddBookmark,
+    ToggleStats,
 }
 
 /// Maps every input trigger to an optional Action. `None` means the input is
@@ -138,6 +139,7 @@ impl Default for Bindings {
         keys.insert("v".into(), Action::ToggleSubVisibility);
         keys.insert("i".into(), Action::ToggleHwDec);
         keys.insert("b".into(), Action::AddBookmark);
+        keys.insert("s".into(), Action::ToggleStats);
 
         Self {
             keys,
@@ -177,6 +179,7 @@ fn action_to_message(a: Action) -> Message {
         Action::NextFile => Message::NextFile,
         Action::OpenFile => Message::OpenFile,
         Action::AddBookmark => Message::AddBookmark,
+        Action::ToggleStats => Message::ToggleStats,
     }
 }
 
@@ -311,6 +314,11 @@ pub struct MpvNe {
     /// would otherwise stomp the probed full extent and make the seekbar flicker
     /// back to a tiny value; DurationChanged never drops below this.
     pub probed_duration: f64,
+    /// When true, the stats overlay (bitrate/fps/dropped/buffer) is shown and
+    /// polled on a timer. Toggled with the S key.
+    pub show_stats: bool,
+    /// Latest polled playback stats; only refreshed while `show_stats` is on.
+    pub stats: crate::player::PlayerStats,
     /// Monotonically-increasing counter for deferred thumbnail generation.
     /// Each live chase completion increments this; `GenerateThumbnails(id)`
     /// is a no-op when `id != thumb_pending_id`, so only the last End press
@@ -398,6 +406,8 @@ impl Default for MpvNe {
             size_ref_size: 0,
             size_ref_duration: 0.0,
             probed_duration: 0.0,
+            show_stats: false,
+            stats: crate::player::PlayerStats::default(),
             thumb_pending_id: 0,
             pre_fullscreen_w: None,
             pre_fullscreen_h: None,
@@ -497,6 +507,10 @@ pub enum Message {
     SubDelayChanged(f64),
     AudioDelayChanged(f64),
     TakeScreenshot,
+    /// Toggle the stats overlay on/off.
+    ToggleStats,
+    /// Periodic poll to refresh the stats overlay while it is visible.
+    StatsTick,
     // Loop / deinterlace toggles
     /// True duration probed from container header/tail for the currently-loaded file.
     LiveDurationProbed(f64),
@@ -1060,6 +1074,18 @@ impl MpvNe {
                             }
                         }
                     }
+                }
+            }
+            Message::ToggleStats => {
+                self.show_stats = !self.show_stats;
+                if self.show_stats {
+                    // Populate immediately so the overlay isn't empty for a tick.
+                    self.stats = self.player.stats();
+                }
+            }
+            Message::StatsTick => {
+                if self.show_stats && !self.stopped {
+                    self.stats = self.player.stats();
                 }
             }
             Message::LiveDurationProbed(dur) => {
@@ -2548,6 +2574,13 @@ impl MpvNe {
             subs.push(
                 iced::time::every(std::time::Duration::from_secs(3))
                     .map(|_| Message::FileSizeTick),
+            );
+        }
+        // Refresh the stats overlay ~2x/sec while it's visible.
+        if self.show_stats && !self.stopped {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(500))
+                    .map(|_| Message::StatsTick),
             );
         }
         Subscription::batch(subs)
