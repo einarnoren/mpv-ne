@@ -309,6 +309,9 @@ pub struct MpvNe {
     /// Which panel (if any) is docked to the right. Toggling with the same
     /// kind closes it; toggling with a different kind switches without resize.
     pub active_panel: Option<PanelKind>,
+    /// The panel to reopen when the panels button is pressed while closed.
+    /// Remembers the last panel the user had open; starts on Playlist.
+    pub last_panel: PanelKind,
     /// Current directory shown in the browser panel. `None` = drives list.
     pub browser_path: Option<std::path::PathBuf>,
     /// Cached entries for the current browser directory.
@@ -429,6 +432,7 @@ impl Default for MpvNe {
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
+            last_panel: PanelKind::Playlist,
             browser_path: None,
             browser_entries: Vec::new(),
             resume_db: ResumeDb::load(),
@@ -1741,9 +1745,12 @@ impl MpvNe {
                 return iced::clipboard::write(path_str);
             }
             Message::TogglePanelsMenu => {
-                self.panels_menu_open = !self.panels_menu_open;
-                if self.panels_menu_open {
-                    if let Some((x, _)) = self.cursor_pos { self.popup_anchor_x = x; }
+                // Direct toggle (no picker): close the open panel, or reopen the
+                // last-used one. Switch panels via the tab bar once open.
+                if self.active_panel.is_some() {
+                    return self.toggle_panel(None);
+                } else {
+                    return self.toggle_panel(Some(self.last_panel));
                 }
             }
             Message::TogglePlaylistSort => {
@@ -2437,6 +2444,7 @@ impl MpvNe {
                     self.browser_entries = browser_drives();
                 }
                 self.active_panel = Some(k);
+                self.last_panel = k; // remember for the next quick toggle
             }
             None => {
                 self.active_panel = None;
