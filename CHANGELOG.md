@@ -6,7 +6,19 @@ session, so this represents the full feature history.
 
 ---
 
-## [0.2.0] — Unreleased
+## [0.2.0] — 2026-06-29
+
+### Playback & View
+- **Stats overlay** (`S` key) — top-right panel showing resolution, video/audio
+  codec and bitrate, container/measured fps, dropped frames, A/V sync, demux
+  buffer-ahead, and decode mode. Polled twice a second only while visible.
+- **Frame fit cycle** (`Z` key) — cycle Fit (letterbox), Fill (crop to cover),
+  and Stretch (distort to fill). Applied in the render shader; resets per file.
+
+### UI
+- The panels button now toggles the last-used side panel directly (switch
+  between Playlist / Browser / Recent / Settings via the tab bar) instead of
+  opening a picker popup.
 
 ### Live / Growing File Support
 - **Full duration shown on load** — a lightweight container byte-rate probe scans
