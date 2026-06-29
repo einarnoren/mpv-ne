@@ -98,6 +98,37 @@ pub enum Action {
     OpenFile,
     AddBookmark,
     ToggleStats,
+    CycleFrameMode,
+}
+
+/// How the video frame is fitted into the window. Cycled with the Z key and
+/// applied by the letterbox shader (mpv renders at native size).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameMode {
+    /// Whole frame visible, black bars on the limiting axis.
+    #[default]
+    Fit,
+    /// Scale up to cover the window, cropping overflow; aspect preserved.
+    Fill,
+    /// Stretch to fill the window exactly, distorting the aspect ratio.
+    Stretch,
+}
+
+impl FrameMode {
+    fn next(self) -> Self {
+        match self {
+            FrameMode::Fit => FrameMode::Fill,
+            FrameMode::Fill => FrameMode::Stretch,
+            FrameMode::Stretch => FrameMode::Fit,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            FrameMode::Fit => "Fit",
+            FrameMode::Fill => "Fill",
+            FrameMode::Stretch => "Stretch",
+        }
+    }
 }
 
 /// Maps every input trigger to an optional Action. `None` means the input is
@@ -140,6 +171,7 @@ impl Default for Bindings {
         keys.insert("i".into(), Action::ToggleHwDec);
         keys.insert("b".into(), Action::AddBookmark);
         keys.insert("s".into(), Action::ToggleStats);
+        keys.insert("z".into(), Action::CycleFrameMode);
 
         Self {
             keys,
@@ -180,6 +212,7 @@ fn action_to_message(a: Action) -> Message {
         Action::OpenFile => Message::OpenFile,
         Action::AddBookmark => Message::AddBookmark,
         Action::ToggleStats => Message::ToggleStats,
+        Action::CycleFrameMode => Message::CycleFrameMode,
     }
 }
 
@@ -317,6 +350,9 @@ pub struct MpvNe {
     /// When true, the stats overlay (bitrate/fps/dropped/buffer) is shown and
     /// polled on a timer. Toggled with the S key.
     pub show_stats: bool,
+    /// How the video frame is fitted into the window (Fit/Fill/Stretch).
+    /// Cycled with the Z key; resets to Fit on file load.
+    pub frame_mode: FrameMode,
     /// Latest polled playback stats; only refreshed while `show_stats` is on.
     pub stats: crate::player::PlayerStats,
     /// Monotonically-increasing counter for deferred thumbnail generation.
@@ -407,6 +443,7 @@ impl Default for MpvNe {
             size_ref_duration: 0.0,
             probed_duration: 0.0,
             show_stats: false,
+            frame_mode: FrameMode::Fit,
             stats: crate::player::PlayerStats::default(),
             thumb_pending_id: 0,
             pre_fullscreen_w: None,
@@ -509,6 +546,8 @@ pub enum Message {
     TakeScreenshot,
     /// Toggle the stats overlay on/off.
     ToggleStats,
+    /// Cycle the video framing: Fit → Fill → Stretch.
+    CycleFrameMode,
     /// Periodic poll to refresh the stats overlay while it is visible.
     StatsTick,
     // Loop / deinterlace toggles
@@ -890,6 +929,7 @@ impl MpvNe {
                 self.size_ref_size = 0;
                 self.size_ref_duration = 0.0;
                 self.probed_duration = 0.0;
+                self.frame_mode = FrameMode::Fit;
                 // Clear AB loop points and video transform when a new file starts.
                 self.ab_loop_a = None;
                 self.ab_loop_b = None;
@@ -1087,6 +1127,12 @@ impl MpvNe {
                 if self.show_stats && !self.stopped {
                     self.stats = self.player.stats();
                 }
+            }
+            Message::CycleFrameMode => {
+                // Framing is applied by our own letterbox shader (mpv renders at
+                // native size), so this only advances the mode the renderer reads.
+                self.frame_mode = self.frame_mode.next();
+                return Task::done(Message::ShowOsd(self.frame_mode.label().into()));
             }
             Message::LiveDurationProbed(dur) => {
                 // Update duration from the container byte-rate probe so the

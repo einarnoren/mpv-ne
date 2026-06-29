@@ -4,7 +4,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Pipeline, Primitive, Viewport};
 use iced::{Color, Element, Length, Rectangle, mouse};
 
-use crate::app::{Message, MpvNe};
+use crate::app::{FrameMode, Message, MpvNe};
 
 /// Cheaply-cloneable frame payload. The Arc-wrapped pixel buffer flows from
 /// the player thread, into app state, then into the shader Program each draw.
@@ -28,7 +28,7 @@ impl std::fmt::Debug for VideoFrame {
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     if let Some(frame) = &app.current_frame {
         if app.player.path.is_some() && !app.stopped {
-            return iced::widget::shader(VideoProgram { frame: frame.clone() })
+            return iced::widget::shader(VideoProgram { frame: frame.clone(), mode: app.frame_mode })
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into();
@@ -57,6 +57,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
 struct VideoProgram {
     frame: VideoFrame,
+    mode: FrameMode,
 }
 
 impl shader::Program<Message> for VideoProgram {
@@ -69,7 +70,7 @@ impl shader::Program<Message> for VideoProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        VideoPrimitive { frame: self.frame.clone() }
+        VideoPrimitive { frame: self.frame.clone(), mode: self.mode }
     }
 }
 
@@ -78,6 +79,7 @@ impl shader::Program<Message> for VideoProgram {
 #[derive(Debug)]
 struct VideoPrimitive {
     frame: VideoFrame,
+    mode: FrameMode,
 }
 
 impl Primitive for VideoPrimitive {
@@ -92,7 +94,7 @@ impl Primitive for VideoPrimitive {
         _viewport: &Viewport,
     ) {
         pipeline.upload(device, queue, &self.frame);
-        pipeline.update_uniforms(queue, bounds, &self.frame);
+        pipeline.update_uniforms(queue, bounds, &self.frame, self.mode);
     }
 
     /// iced sets the render pass viewport + scissor to our widget bounds
@@ -294,6 +296,7 @@ impl VideoPipeline {
         queue: &wgpu::Queue,
         bounds: &Rectangle,
         frame: &VideoFrame,
+        mode: FrameMode,
     ) {
         if frame.width == 0 || frame.height == 0 || bounds.width <= 0.0 || bounds.height <= 0.0
         {
@@ -301,12 +304,19 @@ impl VideoPipeline {
         }
         let widget_aspect = bounds.width / bounds.height;
         let tex_aspect = frame.width as f32 / frame.height as f32;
-        let (sx, sy) = if widget_aspect > tex_aspect {
-            // Widget wider than video → pillarbox (black bars left/right).
-            (tex_aspect / widget_aspect, 1.0)
-        } else {
-            // Widget taller than video → letterbox (black bars top/bottom).
-            (1.0, widget_aspect / tex_aspect)
+        let wider = widget_aspect > tex_aspect;
+        // The shader samples tex_uv = (uv - 0.5) / scale + 0.5: scale < 1
+        // letterboxes that axis, scale > 1 zooms in and crops it, scale == 1
+        // maps the axis edge-to-edge.
+        let (sx, sy) = match mode {
+            // Fit (contain): whole frame visible, bars on the limiting axis.
+            FrameMode::Fit if wider => (tex_aspect / widget_aspect, 1.0),
+            FrameMode::Fit => (1.0, widget_aspect / tex_aspect),
+            // Fill (cover): scale up to cover, crop overflow — branches swapped.
+            FrameMode::Fill if wider => (1.0, widget_aspect / tex_aspect),
+            FrameMode::Fill => (tex_aspect / widget_aspect, 1.0),
+            // Stretch: map both axes edge-to-edge, distorting the aspect ratio.
+            FrameMode::Stretch => (1.0, 1.0),
         };
         let data: [f32; 4] = [sx, sy, 0.0, 0.0];
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
