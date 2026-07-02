@@ -27,30 +27,14 @@ fn main() -> iced::Result {
         )
         .init();
 
-    let prefs = settings::Settings::load();
-    let (w, h) = prefs.window_size().unwrap_or((1280.0, 720.0));
-    let position = prefs.window_x
-        .zip(prefs.window_y)
-        .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)))
-        .unwrap_or(iced::window::Position::Centered);
-
-    let icon = iced::window::icon::from_file_data(
-        include_bytes!("../assets/MPV_NE_icon_hires.png"),
-        None,
-    ).ok();
-
-    iced::application(MpvNe::default, MpvNe::update, MpvNe::view)
+    // `daemon` (rather than `application`) because the floating main-menu
+    // popup needs to be a genuine second OS window with its own content —
+    // `application`'s view has no window::Id parameter, so every window
+    // would render identically. Daemons don't open a window automatically;
+    // MpvNe::boot() opens the main one explicitly as its first Task.
+    iced::daemon(MpvNe::boot, MpvNe::update, MpvNe::view)
         .title(MpvNe::title)
         .theme(MpvNe::theme)
         .subscription(MpvNe::subscription)
-        .exit_on_close_request(false)
-        .window(iced::window::Settings {
-            size: iced::Size::new(w, h),
-            position,
-            min_size: Some(iced::Size::new(480.0, 160.0)),
-            decorations: !app::USE_CUSTOM_TITLE_BAR,
-            icon,
-            ..Default::default()
-        })
         .run()
 }

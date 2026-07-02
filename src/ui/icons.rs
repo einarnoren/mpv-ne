@@ -263,6 +263,15 @@ pub fn help<'a>() -> Svg<'a> {
         .height(Length::Fixed(ICON_SIZE as f32))
 }
 
+/// Three horizontal lines - main application menu button.
+pub fn hamburger<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
 /// Grid / apps icon for the panels menu button.
 pub fn panels_menu<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></g>"##;

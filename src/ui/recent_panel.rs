@@ -89,6 +89,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         scrollable(
             column(rows).width(Length::Fill).spacing(2).padding([4, 4]),
         )
+        .id("recent_scroll")
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

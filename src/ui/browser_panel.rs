@@ -152,6 +152,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         scrollable(
             column(rows).width(Length::Fill).spacing(1).padding([4, 4]),
         )
+        .id("browser_scroll")
         .width(Length::Fill)
         .height(Length::Fill)
         .into()

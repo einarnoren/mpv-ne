@@ -395,6 +395,11 @@ pub fn seek_hover_popup(
                     - 8.0 - vol_slider_w  // spacing + slider
                     - (if vol_text_w > 0.0 { 8.0 + vol_text_w } else { 0.0 }); // spacing + text
     let bar_w    = (bar_right - bar_left).max(1.0);
+    // Only show the popup when the cursor is actually over the bar's
+    // horizontal extent — the vertical check above only confirms the
+    // cursor is somewhere in the seek row, which also covers the volume
+    // slider and any padding to either side.
+    if cx < bar_left || cx > bar_left + bar_w { return None; }
     // The slider handle is a 6px-radius circle (12px wide). iced maps value 0..1
     // across (bar_w - handle_w), with half a handle of padding on each side.
     let handle_w = 12.0_f32;

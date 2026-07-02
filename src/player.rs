@@ -253,6 +253,12 @@ impl Player {
             set_opt_str(h, "demuxer-max-bytes", "500M");
             set_opt_str(h, "demuxer-readahead-secs", "3600");
 
+            // Screenshot filenames: source filename (no extension) + playback
+            // timestamp with milliseconds, e.g. "MyRecording_01-15-32.451.jpg",
+            // instead of mpv's generic "mpv-shot0001.jpg". mpv sanitizes any
+            // characters the OS filesystem can't handle (e.g. ':') on its own.
+            set_opt_str(h, "screenshot-template", "%F_%P");
+
             let rc = sys::mpv_initialize(h);
             tracing::info!(rc, "mpv_initialize");
             assert_eq!(rc, 0, "mpv_initialize failed: {rc}");

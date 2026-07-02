@@ -13,7 +13,7 @@ use crate::app::{Message, MpvNe, USE_CUSTOM_TITLE_BAR};
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Title text: always show the current file name (or "MPV-NE" when idle).
-    let full_title = app.title();
+    let full_title = app.title_str();
 
     // Playlist counter shown after title when multiple files are loaded.
     let playlist_counter = if app.playlist.len() > 1 {
@@ -77,6 +77,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     ]
     .width(Length::Fill)
     .height(Length::Fill);
+
+    // Main menu: same content as the video right-click menu, opened at a
+    // fixed anchor near this button instead of the cursor.
+    let menu_btn = icons::tipped(
+        icons::square_toggle(icons::hamburger(), app.menu_window_id.is_some(), AURORA_TEAL)
+            .on_press(Message::ToggleMainMenu),
+        "Menu",
+    );
 
     let logo = image(app.img_icon.clone())
     .width(Length::Fixed(22.0))
@@ -142,7 +150,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     }
 
     container(
-        row![logo_btn, drag_region, buttons]
+        row![menu_btn, logo_btn, drag_region, buttons]
             .spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill),

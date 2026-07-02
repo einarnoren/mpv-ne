@@ -237,6 +237,11 @@ pub struct MpvNe {
     render_initialized: bool,
     pub fullscreen: bool,
     window_id: Option<iced::window::Id>,
+    /// OS DPI scale factor for the main window, tracked for informational
+    /// purposes from the Rescaled event. Not used for size-critical work -
+    /// see ResizeDpiQueried and boot() for why (a live window::scale_factor()
+    /// query, matching the Fit menu, proved more reliable than this event).
+    scale_factor: f32,
     modal_hook_installed: bool,
     pub playlist: Vec<std::path::PathBuf>,
     pub playlist_idx: usize,
@@ -301,6 +306,11 @@ pub struct MpvNe {
     pub playlist_sort_open: bool,
     /// Context menu for file entries in panels.
     pub file_context_menu: Option<FileContextMenu>,
+    /// The floating main-menu popup: a genuine second OS window (not an
+    /// in-window overlay), so it can extend past the main window's edges
+    /// like a native right-click menu. `None` when closed. See
+    /// `open_main_menu`/`close_main_menu` and `MpvNe::view`.
+    pub menu_window_id: Option<iced::window::Id>,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -334,6 +344,13 @@ pub struct MpvNe {
     /// DurationChanged will re-seek forward when new content arrives so the user
     /// doesn't have to manually press End after every buffer refill.
     pub live_edge_paused: bool,
+    /// `player.duration` the last time LiveEdgeTick checked for growth, and
+    /// how many consecutive checks in a row found no growth. Once this hits
+    /// the stall threshold, the file is almost certainly not actually
+    /// growing/live, so we stop poking play() every 2s — otherwise a normal,
+    /// finished video would get poked forever every time it reaches EOF.
+    pub live_edge_ref_duration: f64,
+    pub live_edge_stall_count: u32,
     /// File-size-based duration estimate for growing files. Updated every few
     /// seconds by reading the file size from disk and extrapolating from the
     /// known bitrate. Zero when unknown. Used so the seekbar and JumpToLive
@@ -379,6 +396,7 @@ impl Default for MpvNe {
             render_initialized: false,
             fullscreen: false,
             window_id: None,
+            scale_factor: 1.0,
             modal_hook_installed: false,
             playlist: Vec::new(),
             playlist_idx: 0,
@@ -427,6 +445,7 @@ impl Default for MpvNe {
             popup_anchor_x: 0.0,
             playlist_sort_open: false,
             file_context_menu: None,
+            menu_window_id: None,
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
@@ -440,6 +459,8 @@ impl Default for MpvNe {
             live_catching_up: false,
             live_last_seek: 0.0,
             live_edge_paused: false,
+            live_edge_ref_duration: 0.0,
+            live_edge_stall_count: 0,
             size_est_duration: 0.0,
             size_ref_size: 0,
             size_ref_duration: 0.0,
@@ -463,6 +484,9 @@ pub enum Message {
     VolumeChanged(f64),
     WindowResized(iced::window::Id, iced::Size),
     ResizeSettled(u64),
+    /// Follow-up to ResizeSettled once the live DPI scale factor has been
+    /// queried from the OS (seq, dpi) - does the actual settings save + OSD.
+    ResizeDpiQueried(u64, f32),
     CloseRequested(iced::window::Id),
     // Forwarded from the mpv event loop
     PositionChanged(f64),
@@ -609,6 +633,15 @@ pub enum Message {
     OpenFileLocation(std::path::PathBuf),
     CopyFilePath(std::path::PathBuf),
     ClearRecent,
+    /// Right-click on the video area: open the playback shortcuts menu.
+    ShowVideoContextMenu,
+    /// Title-bar hamburger button: same menu, opened at a fixed anchor near
+    /// the button instead of the cursor. Toggles closed if already open.
+    ToggleMainMenu,
+    /// Wraps a menu action so a single handler can close the video context
+    /// menu and then forward the real message, instead of every action
+    /// handler (TogglePause, CycleAudio, …) needing to know about the menu.
+    VideoMenuAction(Box<Message>),
     // Video zoom
     VideoZoomSet(f64),
     VideoZoomReset,
@@ -624,7 +657,7 @@ pub enum Message {
     // Playlist item removal
     PlaylistRemove(usize),
     // Window position tracking
-    WindowMoved(i32, i32),
+    WindowMoved(iced::window::Id, i32, i32),
     // Video equalizer
     BrightnessSet(i64),
     ContrastSet(i64),
@@ -652,8 +685,16 @@ pub enum Message {
     InputMouseDown(iced::mouse::Button, bool),
     InputScroll(f32),
     ModifiersChanged(iced::keyboard::Modifiers),
-    CursorMoved(f32, f32),
-    CursorLeft,
+    /// Carries the source window's id so the handler can ignore movement
+    /// over the menu popup window (which isn't the main window's cursor).
+    CursorMoved(iced::window::Id, f32, f32),
+    CursorLeft(iced::window::Id),
+    /// A window (the menu popup) lost OS focus - close it, matching how a
+    /// native context menu dismisses when you click elsewhere.
+    WindowUnfocused(iced::window::Id),
+    /// The main window's OS DPI scale factor changed (or was reported for
+    /// the first time on open).
+    WindowRescaled(iced::window::Id, f32),
     // AB repeat
     AbLoopSetA,
     AbLoopSetB,
@@ -661,6 +702,54 @@ pub enum Message {
 }
 
 impl MpvNe {
+    /// Daemon boot function: constructs the initial state and opens the
+    /// main window explicitly, since daemons (needed for the floating menu
+    /// popup window) don't open one automatically the way `application`
+    /// does. Mirrors what used to be main.rs's `.window(Settings {...})`.
+    pub fn boot() -> (Self, Task<Message>) {
+        let mut app = Self::default();
+
+        let prefs = crate::settings::Settings::load();
+        // settings.toml stores PHYSICAL pixels (see the ResizeSettled save
+        // block). The real DPI scale factor isn't known until the window
+        // exists and reports it, so this first request uses the saved
+        // numbers as-is (correct at 100% scale) and gets corrected below.
+        let (w, h) = prefs.window_size().unwrap_or((1280.0, 720.0));
+        let position = prefs.window_x
+            .zip(prefs.window_y)
+            .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)))
+            .unwrap_or(iced::window::Position::Centered);
+        let icon = iced::window::icon::from_file_data(
+            include_bytes!("../assets/MPV_NE_icon_hires.png"),
+            None,
+        ).ok();
+
+        let settings = iced::window::Settings {
+            size: iced::Size::new(w, h),
+            position,
+            min_size: Some(iced::Size::new(360.0, 160.0)),
+            decorations: !USE_CUSTOM_TITLE_BAR,
+            icon,
+            exit_on_close_request: false,
+            ..Default::default()
+        };
+        let (id, open_task) = iced::window::open(settings);
+        app.window_id = Some(id);
+        // The size requested above was a guess in logical pixels (the real
+        // DPI scale factor isn't known until the window exists), correct
+        // for anything other than 100% scale. Live-query the factor the
+        // same way the (confirmed-correct) Fit menu does, rather than
+        // trusting the Rescaled *event*, which wasn't reliable enough.
+        let physical = (w, h);
+        let correct_size = open_task.then(move |id| {
+            iced::window::scale_factor(id).then(move |dpi| {
+                let logical = iced::Size::new(physical.0 / dpi, physical.1 / dpi);
+                iced::window::resize::<Message>(id, logical)
+            })
+        });
+        (app, correct_size)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenFile => {
@@ -714,6 +803,13 @@ impl MpvNe {
             }
 
             Message::WindowResized(id, size) => {
+                // The menu popup also fires an initial Resized on creation
+                // even though it's non-resizable - ignore anything that
+                // isn't the main window so it can't clobber window_id or
+                // the layout dimensions everything else reads from.
+                if self.window_id.is_some() && Some(id) != self.window_id {
+                    return Task::none();
+                }
                 self.window_id = Some(id);
                 self.window_h_logical = size.height;
                 self.window_w_logical = size.width;
@@ -756,6 +852,29 @@ impl MpvNe {
 
             Message::ResizeSettled(seq) => {
                 if seq == self.resize_seq {
+                    // Query the DPI scale factor live from the OS rather than
+                    // trusting a cached field - this is the same pattern the
+                    // Fit menu uses (iced::window::scale_factor(id).then(...))
+                    // and it's confirmed correct, whereas the cached
+                    // self.scale_factor populated from the Rescaled event
+                    // was not reliable enough to trust for what gets saved,
+                    // displayed, and (see ResizeDpiQueried) rendered here.
+                    if let Some(id) = self.window_id {
+                        return iced::window::scale_factor(id)
+                            .then(move |dpi| Task::done(Message::ResizeDpiQueried(seq, dpi)));
+                    }
+                }
+            }
+            Message::ResizeDpiQueried(seq, dpi) => {
+                if seq == self.resize_seq {
+                    // Keep the cached factor fresh via this reliable live
+                    // query (not the passive Rescaled event) - apply_render_
+                    // size() reads it synchronously for the mpv render
+                    // texture, where a live query per-call isn't practical.
+                    // Set it before applying so this exact resize's texture
+                    // uses the freshest possible value, not a stale one from
+                    // whatever the factor was on the previous cycle.
+                    self.scale_factor = dpi;
                     self.apply_render_size();
                     // Don't persist window size when maximized - we'd save the
                     // screen resolution and the next launch would open huge.
@@ -767,14 +886,23 @@ impl MpvNe {
                     };
                     if !maximized {
                         // Save video-column width only (strip panel if open).
-                        let save_w = if self.active_panel.is_some() {
-                            (self.window_w_logical - PANEL_W).max(480.0) as u32
+                        let save_w_logical = if self.active_panel.is_some() {
+                            (self.window_w_logical - PANEL_W).max(480.0)
                         } else {
-                            self.window_w_logical.max(0.0) as u32
+                            self.window_w_logical.max(0.0)
                         };
+                        // settings.toml stores PHYSICAL pixels (see
+                        // desired_window_physical's doc comment) - convert
+                        // from iced's logical pixels using the live-queried
+                        // DPI scale factor so what's saved matches what the
+                        // monitor actually shows, and what boot() loads back
+                        // stays consistent across sessions instead of
+                        // compounding a logical/physical mismatch.
+                        let save_w = (save_w_logical * dpi).round() as u32;
+                        let save_h = (self.window_h_logical.max(0.0) * dpi).round() as u32;
                         crate::settings::Settings {
                             window_w: Some(save_w),
-                            window_h: Some(self.window_h_logical.max(0.0) as u32),
+                            window_h: Some(save_h),
                             window_x: Some(self.window_x_logical),
                             window_y: Some(self.window_y_logical),
                             resume_enabled: self.resume_enabled,
@@ -782,6 +910,19 @@ impl MpvNe {
                             screenshot_dir: self.screenshot_dir.clone(),
                         }
                         .save();
+                    }
+                    // resize_seq == 1 is the window's own initial Resized
+                    // event on startup, not a user drag - skip the OSD for
+                    // that one so it doesn't fire the instant the app opens.
+                    if self.resize_seq > 1 {
+                        // The rendered video's actual pixel size (fit to the
+                        // available space, aspect-preserved) - not the raw OS
+                        // window size, which includes chrome/letterbox space
+                        // the picture itself doesn't occupy.
+                        let (vw, vh) = self.compute_render_size(self.pending_w, self.pending_h);
+                        let pw = (vw as f32 * dpi).round() as u32;
+                        let ph = (vh as f32 * dpi).round() as u32;
+                        return Task::done(Message::ShowOsd(format!("{pw} × {ph}")));
                     }
                 }
             }
@@ -984,6 +1125,8 @@ impl MpvNe {
                 // after the user has already pressed End).
                 if !self.transitioning && self.player.position >= self.player.duration - 5.0 {
                     self.live_edge_paused = true;
+                    self.live_edge_stall_count = 0;
+                    self.live_edge_ref_duration = self.player.duration;
                     tracing::debug!(
                         pos = self.player.position,
                         dur = self.player.duration,
@@ -1023,9 +1166,31 @@ impl MpvNe {
                 // DurationChanged if more content exists (letting the chase continue),
                 // or re-pause immediately if we're truly at the live edge.
                 if self.live_edge_paused {
+                    // If duration hasn't grown since the last check, this is
+                    // probably just a normal, finished video — not an actual
+                    // growing/live recording. Stop poking after a few stalls
+                    // in a row (not just one, so a momentary write-flush gap
+                    // in a real recording doesn't fool us) instead of poking
+                    // play() forever every 2s.
+                    if self.player.duration <= self.live_edge_ref_duration + 0.01 {
+                        self.live_edge_stall_count += 1;
+                        if self.live_edge_stall_count >= 3 {
+                            tracing::debug!(
+                                dur = self.player.duration,
+                                "live edge: no growth after 3 checks — not a live file, stopping poll"
+                            );
+                            self.live_edge_paused = false;
+                            self.live_catching_up = false;
+                            return Task::none();
+                        }
+                    } else {
+                        self.live_edge_stall_count = 0;
+                        self.live_edge_ref_duration = self.player.duration;
+                    }
                     tracing::debug!(
                         pos = self.player.position,
                         chasing = self.live_catching_up,
+                        stall = self.live_edge_stall_count,
                         "live edge: poking play"
                     );
                     self.player.play();
@@ -1095,6 +1260,8 @@ impl MpvNe {
                             // With keep-open=yes, mpv stays loaded at the last frame.
                             self.player.paused = true;
                             self.live_edge_paused = true;
+                            self.live_edge_stall_count = 0;
+                            self.live_edge_ref_duration = self.player.duration;
                             if self.live_catching_up {
                                 // Chase is in progress — don't wait for the 2s tick.
                                 // Immediately poke play() so mpv resumes reading the
@@ -1725,6 +1892,28 @@ impl MpvNe {
                 self.file_context_menu = Some(crate::app::FileContextMenu { path, x, y });
             }
             Message::CloseFileContextMenu => { self.file_context_menu = None; }
+            Message::ShowVideoContextMenu => {
+                if self.menu_window_id.is_some() { return Task::none(); }
+                let (cx, cy) = self.cursor_pos.unwrap_or((100.0, 100.0));
+                let screen_x = self.window_x_logical as f32 + cx;
+                let screen_y = self.window_y_logical as f32 + cy;
+                return self.open_main_menu(screen_x, screen_y);
+            }
+            Message::ToggleMainMenu => {
+                if self.menu_window_id.is_some() {
+                    return self.close_main_menu();
+                }
+                // Fixed anchor near the hamburger button, rather than the
+                // cursor - the button sits in the same spot regardless of
+                // where the mouse happens to be at click time.
+                let screen_x = self.window_x_logical as f32 + 8.0;
+                let screen_y = self.window_y_logical as f32 + TOP_BAR_H as f32 + 4.0;
+                return self.open_main_menu(screen_x, screen_y);
+            }
+            Message::VideoMenuAction(inner) => {
+                let close = self.close_main_menu();
+                return Task::batch([close, Task::done(*inner)]);
+            }
             Message::OpenFileLocation(path) => {
                 self.file_context_menu = None;
                 if let Some(dir) = path.parent() {
@@ -1817,9 +2006,16 @@ impl MpvNe {
                 }
             }
 
-            Message::WindowMoved(x, y) => {
-                self.window_x_logical = x;
-                self.window_y_logical = y;
+            Message::WindowMoved(id, x, y) => {
+                // Guard against the menu popup's own Moved event overwriting
+                // the main window's tracked screen position - the popup's
+                // open position is computed FROM these fields, so letting
+                // its own Moved event feed back in here would make each
+                // reopen drift further from the true main-window position.
+                if Some(id) == self.window_id {
+                    self.window_x_logical = x;
+                    self.window_y_logical = y;
+                }
             }
 
             Message::LoadSubtitle => {
@@ -1924,7 +2120,12 @@ impl MpvNe {
                 if Some(id) == self.window_id {
                     self.save_resume();
                     self.player.quit();
-                    return iced::window::close(id);
+                    // Daemons (needed for the floating menu popup window)
+                    // don't auto-quit when their windows close, unlike a
+                    // plain single-window Application - exit explicitly.
+                    return Task::batch([iced::window::close(id), iced::exit()]);
+                } else if Some(id) == self.menu_window_id {
+                    return self.close_main_menu();
                 }
             }
 
@@ -2033,7 +2234,7 @@ impl MpvNe {
                 self.save_resume();
                 self.player.quit();
                 if let Some(id) = self.window_id {
-                    return iced::window::close(id);
+                    return Task::batch([iced::window::close(id), iced::exit()]);
                 }
             }
             Message::DragWindow => {
@@ -2134,6 +2335,8 @@ impl MpvNe {
                 self.live_catching_up = true;
                 self.live_last_seek = self.player.duration;
                 self.live_edge_paused = true;
+                self.live_edge_stall_count = 0;
+                self.live_edge_ref_duration = self.player.duration;
                 tracing::info!(
                     pos = self.player.position,
                     dur = self.player.duration,
@@ -2151,8 +2354,31 @@ impl MpvNe {
             }
             Message::FileDropped(path) => return Task::done(Message::FilesDropped(vec![path])),
 
-            Message::CursorMoved(x, y) => self.cursor_pos = Some((x, y)),
-            Message::CursorLeft => self.cursor_pos = None,
+            Message::CursorMoved(id, x, y) => {
+                if Some(id) == self.window_id {
+                    self.cursor_pos = Some((x, y));
+                }
+            }
+            Message::CursorLeft(id) => {
+                if Some(id) == self.window_id {
+                    self.cursor_pos = None;
+                }
+            }
+            Message::WindowUnfocused(id) => {
+                if Some(id) == self.menu_window_id {
+                    return self.close_main_menu();
+                }
+            }
+            Message::WindowRescaled(id, factor) => {
+                // Kept for informational tracking only - the startup size
+                // correction is handled directly in boot()'s task chain via
+                // a live window::scale_factor() query (the pattern proven
+                // correct by the Fit menu), not this event, which wasn't
+                // reliable enough to trust for that.
+                if Some(id) == self.window_id {
+                    self.scale_factor = factor;
+                }
+            }
             Message::InputKey(name) => {
                 // Escape closes the modal first.
                 if name == "escape" && self.modal.is_some() {
@@ -2185,6 +2411,9 @@ impl MpvNe {
                 if name == "escape" && self.file_context_menu.is_some() {
                     self.file_context_menu = None;
                     return Task::none();
+                }
+                if name == "escape" && self.menu_window_id.is_some() {
+                    return self.close_main_menu();
                 }
                 if name == "escape" && self.sub_search_open {
                     self.sub_search_open = false;
@@ -2284,6 +2513,18 @@ impl MpvNe {
                             return Task::done(action_to_message(action));
                         }
                     }
+                } else if button == iced::mouse::Button::Right && !captured {
+                    // Only over the video area itself - not the top bar,
+                    // controls bar, or a docked panel.
+                    let over_video = self.cursor_pos.map(|(x, y)| {
+                        let controls_top = self.window_h_logical - CONTROLS_H as f32;
+                        let panel_left = self.window_w_logical
+                            - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                        y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
+                    }).unwrap_or(false);
+                    if over_video {
+                        return Task::done(Message::ShowVideoContextMenu);
+                    }
                 }
             }
 
@@ -2305,8 +2546,47 @@ impl MpvNe {
         Task::none()
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
-        ui::view(self)
+    pub fn view(&self, window: iced::window::Id) -> Element<'_, Message> {
+        if Some(window) == self.menu_window_id {
+            ui::menu_window_view(self)
+        } else {
+            ui::view(self)
+        }
+    }
+
+    /// Open the floating main-menu popup at the given *screen* coordinates
+    /// (not window-relative - the popup is a separate OS window). iced has
+    /// no way to ask "how tall would this content actually render" from
+    /// outside the render pass, so the height is a row-count-based estimate
+    /// (~30px/item, 1px/divider, 1px column spacing between every row, 2px
+    /// border) matching `menu_window_view`'s exact row counts for each
+    /// media state - keep these in sync if that function's item list changes.
+    fn open_main_menu(&mut self, screen_x: f32, screen_y: f32) -> Task<Message> {
+        let has_media = self.player.path.is_some();
+        let height = if has_media { 820.0 } else { 400.0 };
+        let settings = iced::window::Settings {
+            size: iced::Size::new(224.0, height),
+            position: iced::window::Position::Specific(iced::Point::new(screen_x, screen_y)),
+            resizable: false,
+            decorations: false,
+            transparent: true,
+            level: iced::window::Level::AlwaysOnTop,
+            exit_on_close_request: false,
+            ..Default::default()
+        };
+        let (id, open_task) = iced::window::open(settings);
+        self.menu_window_id = Some(id);
+        open_task.discard()
+    }
+
+    /// Close the floating main-menu popup, if open. Safe to call when it's
+    /// already closed.
+    fn close_main_menu(&mut self) -> Task<Message> {
+        if let Some(id) = self.menu_window_id.take() {
+            iced::window::close(id)
+        } else {
+            Task::none()
+        }
     }
 
     /// True when the controls bar should be drawn. Hidden in fullscreen or
@@ -2560,7 +2840,17 @@ impl MpvNe {
 
     fn apply_render_size(&mut self) {
         let (w, h) = self.compute_render_size(self.pending_w, self.pending_h);
-        self.player.set_render_size(w, h);
+        // Render the actual mpv texture at PHYSICAL pixel resolution so
+        // video stays crisp on HiDPI displays. compute_render_size's
+        // aspect-fit math works in iced's logical pixels (widget_w/h come
+        // from pending_w/h, which are logical) - without this, mpv would
+        // render at a lower resolution than the screen actually shows, and
+        // the GPU would stretch/blur it to fill the real physical viewport.
+        // self.scale_factor is kept fresh via ResizeDpiQueried's live query,
+        // not the passive Rescaled event (see its doc comment for why).
+        let pw = ((w as f32) * self.scale_factor).round().max(1.0) as u32;
+        let ph = ((h as f32) * self.scale_factor).round().max(1.0) as u32;
+        self.player.set_render_size(pw, ph);
     }
 
     #[cfg(target_os = "windows")]
@@ -2588,11 +2878,18 @@ impl MpvNe {
         crate::win32_modal::install(on_enter, on_exit);
     }
 
-    pub fn theme(&self) -> Theme {
+    pub fn theme(&self, _window: iced::window::Id) -> Theme {
         Theme::Nord
     }
 
-    pub fn title(&self) -> String {
+    /// Daemon API wrapper - the window id is unused since the title never
+    /// varies per-window. `title_str` below is the real logic, callable
+    /// directly from UI code that doesn't have (and doesn't need) an id.
+    pub fn title(&self, _window: iced::window::Id) -> String {
+        self.title_str()
+    }
+
+    pub fn title_str(&self) -> String {
         if let Some(path) = &self.player.path {
             let name = std::path::Path::new(path)
                 .file_name()
@@ -2790,7 +3087,7 @@ fn on_window_event(
             Some(Message::FilesDropped(vec![path]))
         }
         Event::Window(iced::window::Event::Moved(point)) => {
-            Some(Message::WindowMoved(point.x as i32, point.y as i32))
+            Some(Message::WindowMoved(id, point.x as i32, point.y as i32))
         }
         Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             use iced::keyboard::{Key, key::Named};
@@ -2824,9 +3121,13 @@ fn on_window_event(
             Some(Message::InputMouseDown(button, captured))
         }
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-            Some(Message::CursorMoved(position.x, position.y))
+            Some(Message::CursorMoved(id, position.x, position.y))
         }
-        Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft),
+        Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft(id)),
+        Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowUnfocused(id)),
+        Event::Window(iced::window::Event::Rescaled(factor)) => {
+            Some(Message::WindowRescaled(id, factor))
+        }
         Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
             let dy = match delta {
                 iced::mouse::ScrollDelta::Lines { y, .. } => y,

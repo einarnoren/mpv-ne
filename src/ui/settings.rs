@@ -89,7 +89,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .spacing(0)
     .width(Length::Fill);
 
+    // A stable id is required here - without one, iced ties the scrollable's
+    // retained scroll offset to its position in the widget tree, and this
+    // app rebuilds the view on every periodic tick (stats refresh, file-size
+    // poll, etc). Any of those causing so much as one conditional element
+    // elsewhere in the tree to appear/disappear is enough to make iced lose
+    // track of this scrollable and snap it back to the top mid-scroll.
     let body = scrollable(content)
+        .id("settings_scroll")
         .width(Length::Fill)
         .height(Length::Fill);
 

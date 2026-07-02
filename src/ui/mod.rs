@@ -109,6 +109,112 @@ pub fn fmt_duration(secs: f64) -> String {
     }
 }
 
+/// Styled context-menu row shared by the video right-click menu.
+fn ctx_menu_item<'a>(label: &'static str, msg: Message) -> Element<'a, Message> {
+    button(text(label).size(12).color(TEXT_BRIGHT))
+        .padding([7, 14])
+        .width(Length::Fill)
+        .style(|_, status| {
+            use iced::widget::button::Status;
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(
+                    if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                )),
+                ..Default::default()
+            }
+        })
+        .on_press(msg)
+        .into()
+}
+
+/// Hairline divider between menu sections.
+fn ctx_menu_divider<'a>() -> Element<'a, Message> {
+    container(Space::new())
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_HOVER)),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Content of the floating main-menu popup window: sectioned like a classic
+/// player menu (File / Playback / Video / Audio / Subtitles / Window / App).
+/// Reachable both by right-clicking the video and via the hamburger button
+/// in the top bar (see ToggleMainMenu / ShowVideoContextMenu in app.rs) -
+/// same content either way, just a different anchor point for the popup.
+///
+/// This is a genuine second OS window (see `open_main_menu` in app.rs), not
+/// an in-window overlay, so unlike the file-context-menu there's no
+/// backdrop widget here — every pixel of the window IS the menu, and it
+/// closes via a menu action, Escape, or losing OS focus.
+pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
+    use iced::widget::Column;
+    let has_media = app.player.path.is_some();
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+
+    items.push(ctx_menu_item("Open file(s)…", Message::VideoMenuAction(Box::new(Message::OpenFile))));
+    items.push(ctx_menu_item("Open URL / stream…", Message::VideoMenuAction(Box::new(Message::OpenUrl))));
+    items.push(ctx_menu_item("Playlist", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
+    items.push(ctx_menu_item("Browse files", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
+    items.push(ctx_menu_item("Recent", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
+    if has_media {
+        items.push(ctx_menu_item("Stop", Message::VideoMenuAction(Box::new(Message::Stop))));
+    }
+    items.push(ctx_menu_divider());
+
+    if has_media {
+        let play_label = if app.player.paused { "Play" } else { "Pause" };
+        items.push(ctx_menu_item(play_label, Message::VideoMenuAction(Box::new(Message::TogglePause))));
+        items.push(ctx_menu_item("Previous file", Message::VideoMenuAction(Box::new(Message::PrevFile))));
+        items.push(ctx_menu_item("Next file", Message::VideoMenuAction(Box::new(Message::NextFile))));
+        items.push(ctx_menu_item("Back 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(-10.0)))));
+        items.push(ctx_menu_item("Forward 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(10.0)))));
+        items.push(ctx_menu_item("Set A-B loop point A", Message::VideoMenuAction(Box::new(Message::AbLoopSetA))));
+        items.push(ctx_menu_item("Set A-B loop point B", Message::VideoMenuAction(Box::new(Message::AbLoopSetB))));
+        items.push(ctx_menu_item("Clear A-B loop", Message::VideoMenuAction(Box::new(Message::AbLoopClear))));
+        items.push(ctx_menu_divider());
+
+        items.push(ctx_menu_item("Cycle fit / fill / stretch", Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
+        items.push(ctx_menu_item("Take screenshot", Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
+        items.push(ctx_menu_divider());
+
+        items.push(ctx_menu_item("Cycle audio track", Message::VideoMenuAction(Box::new(Message::CycleAudio))));
+        let mute_label = if app.player.muted { "Unmute" } else { "Mute" };
+        items.push(ctx_menu_item(mute_label, Message::VideoMenuAction(Box::new(Message::ToggleMute))));
+        items.push(ctx_menu_divider());
+
+        items.push(ctx_menu_item("Cycle subtitle track", Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
+        items.push(ctx_menu_divider());
+    }
+
+    let fs_label = if app.fullscreen { "Exit fullscreen" } else { "Fullscreen" };
+    items.push(ctx_menu_item(fs_label, Message::VideoMenuAction(Box::new(Message::ToggleFullscreen))));
+    let focus_label = if app.chrome_force_hidden { "Exit focus mode" } else { "Focus mode" };
+    items.push(ctx_menu_item(focus_label, Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
+    let pin_label = if app.pinned { "Unpin (always on top)" } else { "Always on top" };
+    items.push(ctx_menu_item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
+    items.push(ctx_menu_item("Settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
+    items.push(ctx_menu_item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
+    items.push(ctx_menu_divider());
+
+    items.push(ctx_menu_item("Keyboard shortcuts", Message::VideoMenuAction(Box::new(Message::ShowHelp))));
+    items.push(ctx_menu_item("Exit", Message::VideoMenuAction(Box::new(Message::CloseWindow))));
+
+    container(
+        Column::with_children(items).spacing(1).width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(BG_DEEPEST)),
+        border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+        ..Default::default()
+    })
+    .into()
+}
+
 fn tabbed_panel(app: &MpvNe, active: PanelKind) -> Element<'_, Message> {
     // Tab definitions: (label, kind).
     const TABS: &[(&str, PanelKind)] = &[
@@ -521,7 +627,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     };
 
     // Panels are toggled directly from the panels button (last-used panel),
-    // with switching via the tab bar — no picker popup.
+    // with switching via the tab bar — no picker popup. The main menu itself
+    // is no longer rendered here at all — it's a separate floating OS
+    // window now; see `menu_window_view` below and `MpvNe::view`.
     let with_panels_popup: Element<'_, Message> = with_ctx_menu;
 
     let with_modal: Element<'_, Message> = if let Some(modal) = &app.modal {
@@ -706,6 +814,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .into()
             });
             scrollable(column(rows).spacing(2).padding([4, 0]))
+                .id("subsearch_scroll")
                 .height(Length::Fixed(280.0))
                 .into()
         };
