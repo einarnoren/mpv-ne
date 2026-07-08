@@ -6,6 +6,55 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.3.0] — 2026-07-08
+
+### Main Menu
+- **Floating main menu** — hamburger button in the top bar and right-click on
+  the video both open the same menu (File / Playback / Video / Audio /
+  Subtitles / Window / App). Implemented as a genuine separate OS window
+  (not an in-window overlay), so it can extend past the main window's edges
+  like a native context menu. Required switching the app from iced's
+  `application` to `daemon` builder for per-window view content.
+
+### Window Behaviour
+- **Window-to-window snap** — dragging one MPV-NE window near another now
+  snaps to it, like PotPlayer with multiple instances open: abutting (edge
+  touches the other window's opposite edge) and aligning (edge matches the
+  other window's same edge), whichever is closer. Corner-to-corner catches
+  too. Siblings are identified by window class name, no process queries.
+- Fixed a jitter bug in the snap engine: once an edge snapped, its target was
+  recomputed fresh every frame, so near a corner (where an abut and an align
+  candidate can both be in range at once) the position could silently flip
+  between them without a proper release. The target now freezes at the
+  moment it snaps.
+- Fixed `WindowMoved` saving Windows' off-screen sentinel position
+  (~-32000, -32000, reported while minimized) as if it were real, which made
+  the window unreachable on the next launch after being minimized.
+- **Resize OSD** — shows the rendered video's actual pixel size on resize,
+  like other action toasts.
+
+### DPI / HiDPI Correctness
+- Window sizing, `settings.toml` persistence, the resize OSD, and the actual
+  mpv video render resolution are now all consistently physical-pixel-aware
+  via a live-queried OS scale factor (matching the pattern the Fit menu
+  already used correctly). Previously the video could silently render at a
+  lower resolution than the display on any scaled (>100%) monitor, and saved
+  window sizes could drift wrong across sessions.
+
+### Fixes
+- Live-edge polling now detects after 3 stalled duration checks that a file
+  isn't actually growing/live, and stops poking `play()` every 2s forever.
+- Seek-bar hover thumbnail no longer appears across the whole control row —
+  only when actually hovering the timeline bar itself.
+- Scrollable panels (Settings, Playlist, Recent, Browser, subtitle search)
+  no longer snap back to the top mid-scroll — they were missing stable
+  widget ids, so periodic background ticks (stats refresh, file-size
+  polling) could reset scroll position.
+- Screenshot filenames now include the source filename and playback
+  timestamp instead of mpv's generic `mpv-shot0001.jpg`.
+
+---
+
 ## [0.2.0] — 2026-06-29
 
 ### Playback & View
