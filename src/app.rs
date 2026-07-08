@@ -2013,8 +2013,16 @@ impl MpvNe {
                 // its own Moved event feed back in here would make each
                 // reopen drift further from the true main-window position.
                 if Some(id) == self.window_id {
-                    self.window_x_logical = x;
-                    self.window_y_logical = y;
+                    // Windows reports a window's position as a sentinel far
+                    // off-screen (around -32000, -32000) while it's
+                    // minimized - saving that as if it were a real position
+                    // would make the window unreachable on next launch.
+                    // Any real monitor position is well within this range.
+                    const SENTINEL_THRESHOLD: i32 = -10_000;
+                    if x > SENTINEL_THRESHOLD && y > SENTINEL_THRESHOLD {
+                        self.window_x_logical = x;
+                        self.window_y_logical = y;
+                    }
                 }
             }
 
