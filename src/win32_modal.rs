@@ -57,6 +57,7 @@ unsafe extern "system" {
     fn SetWindowLongPtrW(hwnd: HWND, index: i32, new_val: isize) -> isize;
     fn CallWindowProcW(prev: isize, hwnd: HWND, msg: u32, w: usize, l: isize) -> isize;
     fn MonitorFromRect(rc: *const RECT, flags: u32) -> HMONITOR;
+    fn MonitorFromPoint(pt: POINT, flags: u32) -> HMONITOR;
     fn GetMonitorInfoW(mon: HMONITOR, mi: *mut MONITORINFO) -> i32;
     fn GetDpiForWindow(hwnd: HWND) -> u32;
     fn GetCursorPos(pt: *mut POINT) -> i32;
@@ -65,6 +66,7 @@ unsafe extern "system" {
 }
 
 const GW_OWNER:                u32 = 4;
+const MONITOR_DEFAULTTONULL:    u32 = 0;
 const MONITOR_DEFAULTTONEAREST: u32 = 2;
 const WM_ENTERMENULOOP: u32 = 0x0211;
 const WM_EXITMENULOOP:  u32 = 0x0212;
@@ -352,6 +354,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// True if `(x, y)` falls on some currently-connected monitor (with a small
+/// margin so a saved position isn't rejected just for having its exact
+/// top-left corner sit a pixel off an edge). Used to validate a saved
+/// window position at boot time, *before* any window exists - a saved
+/// position from a monitor that's since been disconnected, unplugged, or
+/// rearranged would otherwise open the window off-screen and unreachable,
+/// the same class of bug as the minimized-window sentinel position.
+/// MonitorFromPoint needs no window handle, so this works pre-creation.
+pub fn is_position_reachable(x: i32, y: i32) -> bool {
+    let pt = POINT { x: x + 50, y: y + 50 };
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONULL) };
+    hmon != 0
+}
 
 pub fn install(
     on_enter: impl Fn() + Send + Sync + 'static,

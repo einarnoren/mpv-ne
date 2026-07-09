@@ -717,6 +717,19 @@ impl MpvNe {
         let (w, h) = prefs.window_size().unwrap_or((1280.0, 720.0));
         let position = prefs.window_x
             .zip(prefs.window_y)
+            // Reject a saved position that isn't on any currently-connected
+            // monitor (e.g. the monitor it was saved on got disconnected or
+            // rearranged since) - otherwise the window would open off-screen
+            // and be unreachable, the same class of bug as the minimized-
+            // window sentinel position fixed earlier. No window exists yet
+            // at boot, so this has to be a standalone monitor query, not a
+            // window-relative one.
+            .filter(|&(x, y)| {
+                #[cfg(target_os = "windows")]
+                { crate::win32_modal::is_position_reachable(x, y) }
+                #[cfg(not(target_os = "windows"))]
+                { true }
+            })
             .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)))
             .unwrap_or(iced::window::Position::Centered);
         let icon = iced::window::icon::from_file_data(
