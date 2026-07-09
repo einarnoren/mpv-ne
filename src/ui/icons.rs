@@ -263,6 +263,16 @@ pub fn help<'a>() -> Svg<'a> {
         .height(Length::Fixed(ICON_SIZE as f32))
 }
 
+/// Large rect with a small filled rect docked in its bottom-right corner -
+/// Picture-in-Picture toggle.
+pub fn pip<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="12" width="7" height="5" rx="1" fill="#C5CDD9"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
 /// Three horizontal lines - main application menu button.
 pub fn hamburger<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></g>"##;

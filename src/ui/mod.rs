@@ -195,6 +195,8 @@ pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
     items.push(ctx_menu_item(focus_label, Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
     let pin_label = if app.pinned { "Unpin (always on top)" } else { "Always on top" };
     items.push(ctx_menu_item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
+    let pip_label = if app.pip_active { "Exit Picture-in-Picture" } else { "Picture-in-Picture" };
+    items.push(ctx_menu_item(pip_label, Message::VideoMenuAction(Box::new(Message::TogglePip))));
     items.push(ctx_menu_item("Settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
     items.push(ctx_menu_item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
     items.push(ctx_menu_divider());
@@ -356,7 +358,49 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Player column: top bar + video + controls. When the settings panel is
     // docked this column shrinks to give the panel its fixed slice of space.
-    let player_col: Element<'_, Message> = if app.chrome_visible() {
+    let player_col: Element<'_, Message> = if app.pip_active {
+        // Minimal PiP overlay: play/pause, seek, volume, and close, shown
+        // while the cursor is over the (small) window, plus drag-anywhere
+        // since a borderless PiP window has no title bar to grab.
+        // Deliberately NOT the full app chrome - popping the whole top
+        // bar/controls bar onto a small corner window would feel cramped;
+        // real PiP just gives you the essentials.
+        let drag_area = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+            .on_press(Message::DragWindow);
+
+        let mut layers: Vec<Element<'_, Message>> = vec![video::view(app), drag_area.into()];
+        if app.cursor_pos.is_some() {
+            let play_glyph = if app.player.paused { icons::play() } else { icons::pause() };
+            let play_btn = icons::square_btn(play_glyph).on_press(Message::TogglePause);
+            let close_btn = icons::square_btn(icons::window_close()).on_press(Message::TogglePip);
+
+            let duration = app.player.duration;
+            let seek = iced::widget::slider(0.0..=duration.max(1.0), app.player.position, Message::Seek)
+                .width(Length::Fill);
+            let volume = iced::widget::slider(0.0..=200.0, app.player.volume, Message::VolumeChanged)
+                .width(Length::Fixed(60.0));
+
+            let bar = container(
+                row![play_btn, seek, volume, close_btn]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+                ..Default::default()
+            });
+            layers.push(
+                container(bar)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(Vertical::Bottom)
+                    .into(),
+            );
+        }
+        stack(layers).width(Length::Fill).height(Length::Fill).into()
+    } else if app.chrome_visible() {
         column![top_bar::view(app), video::view(app), controls::view(app)]
             .width(Length::Fill)
             .height(Length::Fill)

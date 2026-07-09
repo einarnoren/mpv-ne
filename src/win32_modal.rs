@@ -369,6 +369,24 @@ pub fn is_position_reachable(x: i32, y: i32) -> bool {
     hmon != 0
 }
 
+/// Work area (left, top, right, bottom, in physical pixels) of the monitor
+/// nearest to `(x, y)`. Used to position Picture-in-Picture mode in a
+/// screen corner without needing a live window handle - same
+/// MonitorFromRect/GetMonitorInfoW pattern the WM_MOVING snap hook already
+/// uses for monitor-edge snapping.
+pub fn work_area_near(x: i32, y: i32) -> (i32, i32, i32, i32) {
+    let rect = RECT { left: x, top: y, right: x + 1, bottom: y + 1 };
+    let hmon = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST) };
+    let mut mi = MONITORINFO {
+        cb_size:    std::mem::size_of::<MONITORINFO>() as u32,
+        rc_monitor: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+        rc_work:    RECT { left: 0, top: 0, right: 0, bottom: 0 },
+        dw_flags:   0,
+    };
+    if hmon != 0 { unsafe { GetMonitorInfoW(hmon, &mut mi) }; }
+    (mi.rc_work.left, mi.rc_work.top, mi.rc_work.right, mi.rc_work.bottom)
+}
+
 pub fn install(
     on_enter: impl Fn() + Send + Sync + 'static,
     on_exit:  impl Fn() + Send + Sync + 'static,

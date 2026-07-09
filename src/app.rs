@@ -263,6 +263,17 @@ pub struct MpvNe {
     pub window_y_logical: i32,
     /// True when always-on-top is enabled via the pin button.
     pub pinned: bool,
+    /// True while Picture-in-Picture mode is active: window shrunk to a
+    /// small corner-docked size with chrome hidden and pinned on top,
+    /// automating what you'd otherwise do manually with Focus mode + Pin.
+    pub pip_active: bool,
+    /// Window size and position saved when entering PiP, restored on exit.
+    pip_prev_w: f32,
+    pip_prev_h: f32,
+    pip_prev_x: i32,
+    pip_prev_y: i32,
+    pip_prev_chrome_hidden: bool,
+    pip_prev_pinned: bool,
     /// True while the subtitle picker popup is open; chrome stays visible
     /// and Escape closes it instead of doing whatever Escape is bound to.
     pub subs_menu_open: bool,
@@ -410,6 +421,13 @@ impl Default for MpvNe {
             keyboard_modifiers: iced::keyboard::Modifiers::default(),
             window_y_logical: 0,
             pinned: false,
+            pip_active: false,
+            pip_prev_w: 0.0,
+            pip_prev_h: 0.0,
+            pip_prev_x: 0,
+            pip_prev_y: 0,
+            pip_prev_chrome_hidden: false,
+            pip_prev_pinned: false,
             subs_menu_open: false,
             stopped: false,
             img_logo: iced::widget::image::Handle::from_bytes(
@@ -531,6 +549,7 @@ pub enum Message {
     ToggleHwDec,
     ToggleMaximize,
     TogglePin,
+    TogglePip,
     FitToVisible,
     FitToScale(f32),
     FitToHeight(u32),
@@ -2280,6 +2299,86 @@ impl MpvNe {
                     return iced::window::set_level(id, level);
                 }
             }
+            Message::TogglePip => {
+                // Doesn't make sense combined with fullscreen - ignore.
+                if self.fullscreen { return Task::none(); }
+                let Some(id) = self.window_id else { return Task::none(); };
+
+                if self.pip_active {
+                    // Exit: restore chrome/pin state, size, and position.
+                    self.pip_active = false;
+                    let mut tasks: Vec<Task<Message>> = Vec::new();
+                    if self.chrome_force_hidden != self.pip_prev_chrome_hidden {
+                        tasks.push(Task::done(Message::ToggleChrome));
+                    }
+                    if self.pinned != self.pip_prev_pinned {
+                        tasks.push(Task::done(Message::TogglePin));
+                    }
+                    tasks.push(iced::window::resize(
+                        id, iced::Size::new(self.pip_prev_w, self.pip_prev_h),
+                    ));
+                    tasks.push(iced::window::move_to(
+                        id, iced::Point::new(self.pip_prev_x as f32, self.pip_prev_y as f32),
+                    ));
+                    return Task::batch(tasks);
+                }
+
+                // Enter: save current state to restore on exit, then shrink
+                // the window down to exactly the video's current size
+                // (trimming the chrome height/panel width that's about to
+                // become dead space now that chrome hides), pin, and dock
+                // to a screen corner. Chrome hides via the same mechanism
+                // Focus mode uses, but the PiP view replaces it with a
+                // minimal play/pause + close overlay instead of reusing the
+                // full app chrome - see ui::mod's player_col branch.
+                self.pip_active = true;
+                self.pip_prev_w = self.window_w_logical;
+                self.pip_prev_h = self.window_h_logical;
+                self.pip_prev_x = self.window_x_logical;
+                self.pip_prev_y = self.window_y_logical;
+                self.pip_prev_chrome_hidden = self.chrome_force_hidden;
+                self.pip_prev_pinned = self.pinned;
+                let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                self.active_panel = None;
+
+                let mut tasks: Vec<Task<Message>> = Vec::new();
+                if !self.chrome_force_hidden {
+                    tasks.push(Task::done(Message::ToggleChrome));
+                }
+                if !self.pinned {
+                    tasks.push(Task::done(Message::TogglePin));
+                }
+
+                // Shrink to the actual rendered video picture, not just the
+                // video widget area - the area can be wider/taller than the
+                // picture itself (letterbox bars) if the window's current
+                // aspect doesn't match the video's, and PiP should never
+                // carry that dead space along.
+                let chrome_h = (CONTROLS_H + TOP_BAR_H) as f32;
+                let area_w = ((self.window_w_logical - panel_w).max(1.0)) as u32;
+                let area_h = ((self.window_h_logical - chrome_h).max(1.0)) as u32;
+                let (render_w, render_h) = self.compute_render_size(area_w, area_h);
+                let target_w = (render_w as f32).max(160.0);
+                let target_h = (render_h as f32).max(90.0);
+                let cur_x = self.window_x_logical;
+                let cur_y = self.window_y_logical;
+                const MARGIN_PHYSICAL: f32 = 20.0;
+                let resize_and_move = iced::window::scale_factor(id).then(move |dpi| {
+                    let margin_log = MARGIN_PHYSICAL / dpi;
+                    #[cfg(target_os = "windows")]
+                    let (_, _, wa_r, wa_b) = crate::win32_modal::work_area_near(cur_x, cur_y);
+                    #[cfg(not(target_os = "windows"))]
+                    let (wa_r, wa_b): (i32, i32) = (1920, 1080);
+                    let x_log = wa_r as f32 / dpi - target_w - margin_log;
+                    let y_log = wa_b as f32 / dpi - target_h - margin_log;
+                    Task::batch([
+                        iced::window::resize(id, iced::Size::new(target_w, target_h)),
+                        iced::window::move_to(id, iced::Point::new(x_log, y_log)),
+                    ])
+                });
+                tasks.push(resize_and_move);
+                return Task::batch(tasks);
+            }
             Message::ToggleChrome => {
                 let was_visible = self.chrome_visible();
                 self.chrome_force_hidden = !self.chrome_force_hidden;
@@ -2584,7 +2683,9 @@ impl MpvNe {
     /// media state - keep these in sync if that function's item list changes.
     fn open_main_menu(&mut self, screen_x: f32, screen_y: f32) -> Task<Message> {
         let has_media = self.player.path.is_some();
-        let height = if has_media { 820.0 } else { 400.0 };
+        // +1 item vs the original estimate (Picture-in-Picture, in the
+        // always-shown Window section) - bump both by ~30px accordingly.
+        let height = if has_media { 850.0 } else { 430.0 };
         let settings = iced::window::Settings {
             size: iced::Size::new(224.0, height),
             position: iced::window::Position::Specific(iced::Point::new(screen_x, screen_y)),

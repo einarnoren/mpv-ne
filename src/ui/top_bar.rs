@@ -121,6 +121,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         "Always on top",
     );
 
+    let pip_btn = icons::tipped(
+        icons::square_toggle(icons::pip(), app.pip_active, AURORA_TEAL)
+            .on_press(Message::TogglePip),
+        "Picture-in-Picture",
+    );
+
     // Fullscreen lives on the bottom controls bar - that's where playback
     // actions belong. Top bar is reserved for window-level toggles.
     let help_btn = icons::tipped(
@@ -129,7 +135,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         "Keyboard shortcuts (?)",
     );
 
-    let mut buttons = row![help_btn, focus_btn, pin_btn]
+    let mut buttons = row![help_btn, focus_btn, pin_btn, pip_btn]
         .spacing(8)
         .align_y(Alignment::Center);
 
