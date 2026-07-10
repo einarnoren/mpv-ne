@@ -14,7 +14,7 @@ use crate::app::USE_CUSTOM_TITLE_BAR;
 use iced::alignment::{Horizontal, Vertical};
 use iced::{
     Border, Color, Element, Length, Padding,
-    widget::{Space, button, column, container, mouse_area, pin, row, stack, text, tooltip},
+    widget::{Space, button, column, container, image, mouse_area, pin, row, stack, text, tooltip},
 };
 
 use crate::app::{Message, MpvNe, PanelKind};
@@ -310,7 +310,7 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
         });
 
     let inner: Element<'_, Message> = if crate::app::USE_CUSTOM_TITLE_BAR {
-        column![panel_title_bar(), body].width(Length::Fill).height(Length::Fill).into()
+        column![panel_title_bar(app), body].width(Length::Fill).height(Length::Fill).into()
     } else {
         body.into()
     };
@@ -330,12 +330,20 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
         .into()
 }
 
-/// Slim custom title bar for the detached panel window - matches the main
-/// window's frameless chrome (see `ui::top_bar`) instead of showing the OS's
-/// native decorations, which would look out of place next to it.
-fn panel_title_bar<'a>() -> Element<'a, Message> {
-    let title_label = text("MPV-NE").size(12).color(TEXT_BRIGHT);
+/// Custom title bar for the detached panel window - deliberately mirrors
+/// `top_bar::view`'s structure (same logo, height, padding, spacing, button
+/// sizing) instead of inventing its own slimmer bar, so the detached window
+/// reads as part of the same app rather than a bolted-on utility window.
+fn panel_title_bar(app: &MpvNe) -> Element<'_, Message> {
+    let logo = image(app.img_icon.clone())
+        .width(Length::Fixed(22.0))
+        .height(Length::Fixed(22.0));
+    let logo_btn = container(logo)
+        .padding(iced::Padding { top: 0.0, right: 6.0, bottom: 0.0, left: 2.0 })
+        .height(Length::Fill)
+        .align_y(Vertical::Center);
 
+    let title_label = text("MPV-NE Panel").size(13).color(TEXT_BRIGHT);
     let drag_region = mouse_area(
         container(title_label)
             .padding([0, 8])
@@ -345,6 +353,10 @@ fn panel_title_bar<'a>() -> Element<'a, Message> {
     )
     .on_press(Message::PanelDragWindow);
 
+    let dock_btn = icons::tipped(
+        icons::square_btn(icons::dock()).on_press(Message::ReattachPanel),
+        "Dock panel back into the main window",
+    );
     let min_btn = icons::tipped(
         icons::square_btn(icons::window_minimize()).on_press(Message::PanelMinimize),
         "Minimize",
@@ -357,16 +369,19 @@ fn panel_title_bar<'a>() -> Element<'a, Message> {
         icons::square_btn(icons::window_close()).on_press(Message::ClosePanelWindow),
         "Close panel",
     );
+    let buttons = row![dock_btn, min_btn, max_btn, close_btn]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
 
     container(
-        row![drag_region, min_btn, max_btn, close_btn]
-            .spacing(6)
+        row![logo_btn, drag_region, buttons]
+            .spacing(8)
             .align_y(iced::Alignment::Center)
             .width(Length::Fill),
     )
-    .padding(6)
+    .padding(8)
     .width(Length::Fill)
-    .height(Length::Fixed(36.0))
+    .height(Length::Fixed(44.0))
     .style(|_| container::Style {
         background: Some(iced::Background::Color(BG_SURFACE)),
         ..Default::default()
@@ -421,24 +436,6 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
             r = r.push(tipped_tab);
         }
 
-        if detached {
-            let dock_btn = icons::tipped(
-                icons::square_btn(icons::dock()).on_press(Message::ReattachPanel),
-                "Dock panel back into the main window",
-            );
-            r = r.push(dock_btn);
-        } else {
-            let detach_btn = icons::tipped(
-                icons::square_btn(icons::detach()).on_press(Message::DetachPanel),
-                "Pop panel out into its own window",
-            );
-            let close_btn = icons::tipped(
-                icons::square_btn(icons::panel_close()).on_press(Message::TogglePanel(active)),
-                "Close panel",
-            );
-            r = r.push(detach_btn).push(close_btn);
-        }
-
         container(r)
             .width(Length::Fill)
             .style(|_| container::Style {
@@ -452,6 +449,42 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
             })
     };
 
+    // Detach/close buttons get their own row above the tabs, instead of
+    // squeezing into the tabs' row and truncating their labels in a narrow
+    // panel. Only shown docked - once detached, the window's own title bar
+    // (see `panel_title_bar`) already carries the dock/min/max/close
+    // buttons, so this row would just duplicate the dock button.
+    let action_row: Element<'_, Message> = if detached {
+        Space::new().height(Length::Fixed(0.0)).into()
+    } else {
+        let detach_btn = icons::tipped(
+            icons::square_btn(icons::detach()).on_press(Message::DetachPanel),
+            "Pop panel out into its own window",
+        );
+        let close_btn = icons::tipped(
+            icons::square_btn(icons::panel_close()).on_press(Message::TogglePanel(active)),
+            "Close panel",
+        );
+        // Same height/padding/spacing as the main window's top bar
+        // (`top_bar::view`) so the docked panel's header reads as a
+        // continuation of that bar rather than a shorter strip stacked
+        // beside it with a visible seam.
+        container(
+            row![Space::new().width(Length::Fill), detach_btn, close_btn]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .width(Length::Fill),
+        )
+        .padding(8)
+        .width(Length::Fill)
+        .height(Length::Fixed(44.0))
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_SURFACE)),
+            ..Default::default()
+        })
+        .into()
+    };
+
     // Content area for the active tab (panels render their own scrollable body
     // without an internal header - the tab bar serves as the header).
     let content: Element<'_, Message> = match active {
@@ -461,7 +494,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         PanelKind::Settings => settings::view(app),
     };
 
-    column![tab_bar, content]
+    column![action_row, tab_bar, content]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
