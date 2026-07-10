@@ -314,6 +314,11 @@ pub struct MpvNe {
     /// keyframe (faster, less exact). See `Settings::precise_seek`.
     pub precise_seek: bool,
     pub screenshot_dir: String,
+    /// URL waiting on `download_ytdlp` to finish before it can be opened -
+    /// set when a URL needs yt-dlp and it isn't available yet - see
+    /// `Message::ModalConfirm`'s `ModalKind::OpenUrl` arm and
+    /// `Message::YtdlpDownloadResult`.
+    pending_ytdl_url: Option<String>,
     /// Suppresses the next volume OSD (used when restoring saved volume at startup).
     suppress_volume_osd: bool,
     suppress_speed_osd: bool,
@@ -505,6 +510,7 @@ impl Default for MpvNe {
             sub_lang: crate::settings::Settings::load().sub_lang,
             precise_seek: crate::settings::Settings::load().precise_seek,
             screenshot_dir: crate::settings::Settings::load().screenshot_dir,
+            pending_ytdl_url: None,
             suppress_volume_osd: false,
             suppress_speed_osd: true, // suppress the startup 1x event
             show_help: false,
@@ -559,6 +565,13 @@ impl Default for MpvNe {
         };
         app.player.set_audio_normalize(app.audio_normalize);
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
+        // If a previous session already auto-downloaded yt-dlp, use it
+        // without waiting to discover that again on first URL open.
+        if let Some(path) = ytdl_local_path() {
+            if path.exists() {
+                app.player.set_ytdl_path(&path.to_string_lossy());
+            }
+        }
         app
     }
 }
@@ -709,7 +722,9 @@ pub enum Message {
     VideoTransformReset,
     OpenUrl,
     #[allow(dead_code)]
-    UrlEntered(String),
+    /// yt-dlp finished downloading (or failed) - resume opening whatever
+    /// URL was waiting on it, if any.
+    YtdlpDownloadResult(Result<String, String>),
     ChooseScreenshotDir,
     ScreenshotDirSelected(String),
     ToggleResume,
@@ -1894,6 +1909,23 @@ impl MpvNe {
                                 let path = std::path::PathBuf::from(&m.input);
                                 if path.exists() {
                                     self.load_path(path);
+                                } else if needs_ytdl(&m.input) && !ytdl_available() {
+                                    // mpv's built-in ytdl_hook script needs
+                                    // yt-dlp (or youtube-dl) to resolve sites
+                                    // like YouTube into an actual playable
+                                    // stream - without it, loadfile just
+                                    // silently fails. Direct media URLs
+                                    // (.m3u8/.mp4/rtsp/etc.) don't need this
+                                    // at all, so only fetch it for URLs that
+                                    // look like they do. yt-dlp is public
+                                    // domain (The Unlicense), so
+                                    // auto-fetching a copy has no licensing
+                                    // concerns.
+                                    self.pending_ytdl_url = Some(m.input);
+                                    return Task::batch([
+                                        Task::done(Message::ShowOsd("Downloading yt-dlp...".into())),
+                                        Task::perform(download_ytdlp(), Message::YtdlpDownloadResult),
+                                    ]);
                                 } else {
                                     self.player.open_url(&m.input);
                                     return Task::done(Message::ShowOsd(format!("Opening: {}", m.input)));
@@ -1981,15 +2013,18 @@ impl MpvNe {
             Message::OpenUrl => {
                 return Task::done(Message::OpenModal(ModalKind::OpenUrl));
             }
-            Message::UrlEntered(url) => {
-                if !url.is_empty() {
-                    let path = std::path::PathBuf::from(&url);
-                    if path.exists() {
-                        self.load_path(path);
-                    } else {
-                        // Treat as URL for yt-dlp streaming.
-                        self.player.open_url(&url);
-                        return Task::done(Message::ShowOsd(format!("Opening: {url}")));
+            Message::YtdlpDownloadResult(result) => {
+                match result {
+                    Ok(path) => {
+                        self.player.set_ytdl_path(&path);
+                        if let Some(url) = self.pending_ytdl_url.take() {
+                            self.player.open_url(&url);
+                            return Task::done(Message::ShowOsd(format!("Opening: {url}")));
+                        }
+                    }
+                    Err(e) => {
+                        self.pending_ytdl_url = None;
+                        return Task::done(Message::ShowOsd(format!("yt-dlp download failed: {e}")));
                     }
                 }
             }
@@ -3419,6 +3454,92 @@ fn edge_direction_for(cursor: (f32, f32), w: f32, h: f32) -> Option<iced::window
         return Some(South);
     }
     None
+}
+
+/// Heuristic for "this URL needs an extractor (yt-dlp/youtube-dl) to become
+/// a playable stream" - a direct media URL (.m3u8, .mp4, rtsp://, etc.)
+/// doesn't, so we don't want to warn about yt-dlp being missing for those.
+/// Not exhaustive (yt-dlp supports 1000+ sites), just the common cases
+/// people actually paste in here.
+fn needs_ytdl(url: &str) -> bool {
+    const EXTRACTOR_HOSTS: &[&str] = &[
+        "youtube.com", "youtu.be", "twitch.tv", "vimeo.com",
+        "dailymotion.com", "twitter.com", "x.com", "tiktok.com",
+        "facebook.com", "soundcloud.com", "reddit.com",
+    ];
+    let lower = url.to_ascii_lowercase();
+    EXTRACTOR_HOSTS.iter().any(|h| lower.contains(h))
+}
+
+/// Whether yt-dlp or (as a fallback) youtube-dl is reachable on PATH -
+/// mpv's ytdl_hook script needs one of them to resolve extractor sites.
+fn ytdl_available() -> bool {
+    let check = |bin: &str| {
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        // In a release build (windows_subsystem="windows"), spawning a
+        // console binary would otherwise briefly flash an empty console
+        // window on screen.
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status().is_ok_and(|s| s.success())
+    };
+    check("yt-dlp") || check("youtube-dl") || ytdl_local_path().is_some_and(|p| p.exists())
+}
+
+/// Where we keep an auto-downloaded yt-dlp binary (see `download_ytdlp`),
+/// separate from resume.json/settings.toml but in the same app data dir.
+fn ytdl_local_path() -> Option<std::path::PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "mpv-ne")?;
+    let name = if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" };
+    Some(dirs.data_dir().join(name))
+}
+
+/// Download yt-dlp's latest release into `ytdl_local_path()`. yt-dlp is
+/// public domain (The Unlicense), so bundling/auto-fetching it has no
+/// licensing concerns.
+async fn download_ytdlp() -> Result<String, String> {
+    let Some(dest) = ytdl_local_path() else {
+        return Err("Couldn't determine where to save yt-dlp".into());
+    };
+    let asset = if cfg!(target_os = "windows") {
+        "yt-dlp.exe"
+    } else if cfg!(target_os = "macos") {
+        "yt-dlp_macos"
+    } else {
+        "yt-dlp"
+    };
+    let url = format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}");
+
+    let resp = reqwest::get(&url).await.map_err(|e| format!("Download failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Download failed: HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("Download failed: {e}"))?;
+
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&dest, &bytes).map_err(|e| format!("Couldn't save yt-dlp: {e}"))?;
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            let mut perms = meta.permissions();
+            perms.set_mode(perms.mode() | 0o111); // +x for owner/group/other
+            let _ = std::fs::set_permissions(&dest, perms);
+        }
+    }
+
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 fn win32_is_maximized(window_id: Option<iced::window::Id>) -> bool {

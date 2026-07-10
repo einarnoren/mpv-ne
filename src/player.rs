@@ -255,6 +255,20 @@ impl Player {
             set_opt_str(h, "demuxer-max-bytes", "500M");
             set_opt_str(h, "demuxer-readahead-secs", "3600");
 
+            // Cap yt-dlp's default format selection at 1080p and skip AV1.
+            // Left unrestricted, yt-dlp grabs the highest available quality
+            // - for YouTube that's often AV1 even well below 4K, which is
+            // brutal to decode without working hardware AV1 decode (common
+            // on GPUs/drivers older than a couple of years) and can take
+            // many seconds - or effectively forever - to produce a first
+            // frame in software, looking like video simply isn't working.
+            // VP9/H264 are far more broadly hardware-accelerated.
+            set_opt_str(
+                h,
+                "ytdl-format",
+                "bestvideo[vcodec!*=av01][height<=?1080]+bestaudio/best[height<=?1080]",
+            );
+
             // Screenshot filenames: source filename (no extension) + playback
             // timestamp with milliseconds, e.g. "MyRecording_01-15-32.451.jpg",
             // instead of mpv's generic "mpv-shot0001.jpg". mpv sanitizes any
@@ -291,6 +305,14 @@ impl Player {
             observe(h, 27, "video-zoom",         sys::mpv_format_MPV_FORMAT_DOUBLE);
             observe(h, 28, "demuxer-cache-time", sys::mpv_format_MPV_FORMAT_DOUBLE);
             observe(h, 29, "eof-reached", sys::mpv_format_MPV_FORMAT_FLAG);
+
+            // Forward mpv's own internal log messages (decoder/vo/demuxer
+            // warnings and errors) into our event stream - without this we
+            // only see our own app-level events, completely blind to
+            // problems mpv itself is reporting (e.g. "failed to open vo",
+            // codec/hwdec fallback notices, network stream errors).
+            let min_level = CString::new("warn").unwrap();
+            sys::mpv_request_log_messages(h, min_level.as_ptr());
 
             Self {
                 handle: Arc::new(Handle(h)),
@@ -529,6 +551,16 @@ impl Player {
         set_opt_str(self.handle.0, "slang", sub_lang);
     }
 
+    /// Point mpv's built-in `ytdl_hook` script at a specific yt-dlp binary
+    /// (e.g. one we auto-downloaded into the app's data dir) instead of
+    /// relying on it being found on PATH.
+    pub fn set_ytdl_path(&self, path: &str) {
+        // script-opts is a single comma-separated key=value list property;
+        // setting it here assumes we're the only thing using it, which
+        // holds since nothing else in this app touches script-opts.
+        set_opt_str(self.handle.0, "script-opts", &format!("ytdl_hook-ytdl_path={path}"));
+    }
+
     pub fn set_rotate(&mut self, degrees: i64) {
         let spec = if degrees != 0 {
             let transpose = match degrees.rem_euclid(360) {
@@ -586,7 +618,16 @@ impl Player {
         }
     }
 
-    pub fn open_url(&self, url: &str) {
+    pub fn open_url(&mut self, url: &str) {
+        // Unlike `open()`, this previously never set `self.path` - the
+        // video display condition in ui::video::view checks
+        // `app.player.path.is_some()`, so streamed URLs would silently
+        // never show a video frame (audio played fine; render pipeline
+        // produced real frames the whole time) and always fall back to the
+        // idle placeholder icon instead.
+        self.path = Some(url.to_string());
+        self.paused = false;
+        self.vf_slots.clear();
         command(self.handle.0, &["loadfile", url]);
     }
 
@@ -773,6 +814,21 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
             }
             sys::mpv_event_id_MPV_EVENT_END_FILE => {
                 let _ = tx.send(PlayerEvent::EndFile);
+            }
+            sys::mpv_event_id_MPV_EVENT_LOG_MESSAGE => {
+                if ev.data.is_null() {
+                    continue;
+                }
+                let msg = unsafe { &*(ev.data as *const sys::mpv_event_log_message) };
+                let prefix = unsafe { c_str_or_empty(msg.prefix) };
+                let text = unsafe { c_str_or_empty(msg.text) };
+                let text = text.trim_end();
+                match msg.log_level {
+                    sys::mpv_log_level_MPV_LOG_LEVEL_FATAL | sys::mpv_log_level_MPV_LOG_LEVEL_ERROR => {
+                        tracing::error!(prefix, "mpv: {text}");
+                    }
+                    _ => tracing::warn!(prefix, "mpv: {text}"),
+                }
             }
             sys::mpv_event_id_MPV_EVENT_PROPERTY_CHANGE => {
                 if ev.data.is_null() {
@@ -1066,6 +1122,16 @@ fn set_prop_f64(h: *mut sys::mpv_handle, name: &str, val: f64) {
 }
 
 /// mpv string-property data is a `char**` - read the inner pointer as a C string.
+/// Read a possibly-null C string (as used by `mpv_event_log_message`'s
+/// fields) without allocating a new copy via `mpv_free` - these are
+/// borrowed, not owned, unlike `mpv_get_property_string`'s results.
+unsafe fn c_str_or_empty(ptr: *const std::os::raw::c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+}
+
 fn read_string_prop(data: *mut std::ffi::c_void) -> Option<String> {
     if data.is_null() {
         return None;
