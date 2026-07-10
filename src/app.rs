@@ -255,6 +255,11 @@ pub struct MpvNe {
     /// `None` when the cursor is outside the window. Used to overlay the
     /// controls on hover while chrome is hidden.
     pub cursor_pos: Option<(f32, f32)>,
+    /// Same as `cursor_pos` but for the detached panel window - kept
+    /// separate since both windows report `CursorMoved` independently and
+    /// sharing one field would let whichever moved last clobber the other's
+    /// resize-edge detection.
+    panel_cursor_pos: Option<(f32, f32)>,
     /// Last known window dimensions and position in logical pixels.
     pub window_h_logical: f32,
     pub window_w_logical: f32,
@@ -351,6 +356,14 @@ pub struct MpvNe {
     /// main window. `None` = docked (normal). `active_panel` still tracks
     /// which tab is showing either way - this only changes where it's drawn.
     pub panel_window_id: Option<iced::window::Id>,
+    /// Screen position the detached panel window was last seen at (updated
+    /// on every move), so re-detaching after a dock/undock cycle reopens it
+    /// where you left it instead of wherever the OS defaults to.
+    panel_last_pos: Option<(i32, i32)>,
+    /// Size the detached panel window was last resized to - same idea as
+    /// `panel_last_pos`, so re-detaching reopens it at the size you left it,
+    /// not always back at the docked-panel default.
+    panel_last_size: Option<(f32, f32)>,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -456,6 +469,7 @@ impl Default for MpvNe {
             last_left_press: None,
             chrome_force_hidden: false,
             cursor_pos: None,
+            panel_cursor_pos: None,
             window_h_logical: 0.0,
             window_w_logical: 0.0,
             window_x_logical: 0,
@@ -513,6 +527,8 @@ impl Default for MpvNe {
             menu_section_open: [false, false],
             menu_anchor: None,
             panel_window_id: None,
+            panel_last_pos: None,
+            panel_last_size: None,
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
@@ -789,7 +805,7 @@ pub enum Message {
     InputKey(String),
     /// `captured` is true when a widget already handled the click. Edge-grip
     /// resize fires regardless; other actions only fire when !captured.
-    InputMouseDown(iced::mouse::Button, bool),
+    InputMouseDown(iced::window::Id, iced::mouse::Button, bool),
     InputScroll(f32),
     ModifiersChanged(iced::keyboard::Modifiers),
     /// Carries the source window's id so the handler can ignore movement
@@ -923,6 +939,10 @@ impl MpvNe {
             }
 
             Message::WindowResized(id, size) => {
+                if Some(id) == self.panel_window_id {
+                    self.panel_last_size = Some((size.width, size.height));
+                    return Task::none();
+                }
                 // The menu popup also fires an initial Resized on creation
                 // even though it's non-resizable - ignore anything that
                 // isn't the main window so it can't clobber window_id or
@@ -2085,8 +2105,19 @@ impl MpvNe {
             }
             Message::DetachPanel => {
                 if self.active_panel.is_some() && self.panel_window_id.is_none() {
+                    // First-ever detach: start at the same size it was
+                    // docked at, so popping it out isn't a jarring resize.
+                    // After that, remember whatever size/position it was
+                    // last left at (see `panel_last_size`/`panel_last_pos`).
+                    let start_h = if self.window_h_logical > 0.0 { self.window_h_logical } else { 640.0 };
+                    let size = self.panel_last_size.unwrap_or((PANEL_W, start_h));
+                    let position = match self.panel_last_pos {
+                        Some((x, y)) => iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)),
+                        None => iced::window::Position::Default,
+                    };
                     let settings = iced::window::Settings {
-                        size: iced::Size::new(320.0, 640.0),
+                        size: iced::Size::new(size.0, size.1),
+                        position,
                         resizable: true,
                         decorations: !USE_CUSTOM_TITLE_BAR,
                         exit_on_close_request: false,
@@ -2094,12 +2125,21 @@ impl MpvNe {
                     };
                     let (id, open_task) = iced::window::open(settings);
                     self.panel_window_id = Some(id);
-                    return open_task.discard();
+                    // The docked panel no longer occupies width in the main
+                    // window - shrink it back, or the video would stretch
+                    // into that now-empty space instead of staying the size
+                    // it was before the panel took up room.
+                    let resize = self.resize_main_for_panel(false);
+                    return Task::batch([open_task.discard(), resize]);
                 }
             }
             Message::ReattachPanel => {
                 if let Some(id) = self.panel_window_id.take() {
-                    return iced::window::close(id);
+                    // Grow the main window back out to make room for the
+                    // panel resuming its docked width - the mirror image of
+                    // the shrink in `DetachPanel`.
+                    let resize = self.resize_main_for_panel(true);
+                    return Task::batch([iced::window::close(id), resize]);
                 }
             }
             Message::ClosePanelWindow => {
@@ -2232,6 +2272,11 @@ impl MpvNe {
                         self.window_x_logical = x;
                         self.window_y_logical = y;
                     }
+                } else if Some(id) == self.panel_window_id {
+                    const SENTINEL_THRESHOLD: i32 = -10_000;
+                    if x > SENTINEL_THRESHOLD && y > SENTINEL_THRESHOLD {
+                        self.panel_last_pos = Some((x, y));
+                    }
                 }
             }
 
@@ -2340,7 +2385,16 @@ impl MpvNe {
                     // Daemons (needed for the floating menu popup window)
                     // don't auto-quit when their windows close, unlike a
                     // plain single-window Application - exit explicitly.
-                    return Task::batch([iced::window::close(id), iced::exit()]);
+                    // Explicitly close the detached panel window too (if
+                    // open) rather than counting on iced::exit() to take it
+                    // down cleanly - it's a separate OS window and we'd
+                    // rather not risk it lingering as an orphan.
+                    let mut tasks = vec![iced::window::close(id)];
+                    if let Some(panel_id) = self.panel_window_id {
+                        tasks.push(iced::window::close(panel_id));
+                    }
+                    tasks.push(iced::exit());
+                    return Task::batch(tasks);
                 } else if Some(id) == self.menu_window_id {
                     return self.close_main_menu();
                 } else if Some(id) == self.panel_window_id {
@@ -2694,11 +2748,15 @@ impl MpvNe {
             Message::CursorMoved(id, x, y) => {
                 if Some(id) == self.window_id {
                     self.cursor_pos = Some((x, y));
+                } else if Some(id) == self.panel_window_id {
+                    self.panel_cursor_pos = Some((x, y));
                 }
             }
             Message::CursorLeft(id) => {
                 if Some(id) == self.window_id {
                     self.cursor_pos = None;
+                } else if Some(id) == self.panel_window_id {
+                    self.panel_cursor_pos = None;
                 }
             }
             Message::WindowUnfocused(id) => {
@@ -2800,9 +2858,17 @@ impl MpvNe {
                     return Task::done(action_to_message(action));
                 }
             }
-            Message::InputMouseDown(button, captured) => {
+            Message::InputMouseDown(event_window, button, captured) => {
                 if button == iced::mouse::Button::Left {
                     // Edge-grip resize fires regardless of captured state.
+                    // The panel window has no other click behavior to
+                    // preserve, so check it first and bail out early.
+                    if Some(event_window) == self.panel_window_id {
+                        if let Some(direction) = self.panel_cursor_edge_direction() {
+                            return iced::window::drag_resize(event_window, direction);
+                        }
+                        return Task::none();
+                    }
                     if let Some(direction) = self.cursor_edge_direction() {
                         if let Some(id) = self.window_id {
                             return iced::window::drag_resize(id, direction);
@@ -2977,54 +3043,21 @@ impl MpvNe {
     /// Windows resize zones (a couple of logical pixels outside the visible
     /// border + a few inside).
     pub fn cursor_edge_direction(&self) -> Option<iced::window::Direction> {
+        if !USE_CUSTOM_TITLE_BAR || self.fullscreen {
+            return None;
+        }
+        edge_direction_for(self.cursor_pos?, self.window_w_logical, self.window_h_logical)
+    }
+
+    /// Same idea as `cursor_edge_direction` but for the detached panel
+    /// window - it also has no OS-drawn resize handles (custom chrome), so
+    /// it needs the same manual edge detection to be resizable at all.
+    pub fn panel_cursor_edge_direction(&self) -> Option<iced::window::Direction> {
         if !USE_CUSTOM_TITLE_BAR {
             return None;
         }
-        if self.fullscreen {
-            return None;
-        }
-        const EDGE_GRIP: f32 = 10.0;
-        const CORNER_GRIP: f32 = 16.0;
-        let (x, y) = self.cursor_pos?;
-        let w = self.window_w_logical;
-        let h = self.window_h_logical;
-        if w <= 0.0 || h <= 0.0 {
-            return None;
-        }
-
-        // Corners first - they win whenever both nearby axes are in range.
-        let near_l_c = x <= CORNER_GRIP;
-        let near_r_c = x >= w - CORNER_GRIP;
-        let near_t_c = y <= CORNER_GRIP;
-        let near_b_c = y >= h - CORNER_GRIP;
-        use iced::window::Direction::*;
-        if near_l_c && near_t_c {
-            return Some(NorthWest);
-        }
-        if near_r_c && near_t_c {
-            return Some(NorthEast);
-        }
-        if near_l_c && near_b_c {
-            return Some(SouthWest);
-        }
-        if near_r_c && near_b_c {
-            return Some(SouthEast);
-        }
-
-        // Otherwise: straight edges.
-        if x <= EDGE_GRIP {
-            return Some(West);
-        }
-        if x >= w - EDGE_GRIP {
-            return Some(East);
-        }
-        if y <= EDGE_GRIP {
-            return Some(North);
-        }
-        if y >= h - EDGE_GRIP {
-            return Some(South);
-        }
-        None
+        let (w, h) = self.panel_last_size.unwrap_or((PANEL_W, 640.0));
+        edge_direction_for(self.panel_cursor_pos?, w, h)
     }
 
     /// Same idea for the top bar - cursor in the top band reveals it as an
@@ -3084,6 +3117,31 @@ impl MpvNe {
     /// Toggle, switch, or close the docked side panel. Returns a resize Task
     /// only when the panel transitions between open and closed (not when
     /// switching between panel kinds, which keeps the same width).
+    /// Grow (`grow = true`) or shrink the main window's width by `PANEL_W`,
+    /// same rule `toggle_panel` uses when a docked panel opens/closes: skip
+    /// it in fullscreen/maximized (nothing to reclaim/make room for there).
+    /// Shared by `DetachPanel`/`ReattachPanel` so popping the panel in/out
+    /// of its own window resizes the main window the same way toggling it
+    /// docked would.
+    fn resize_main_for_panel(&self, grow: bool) -> Task<Message> {
+        let maximized = {
+            #[cfg(target_os = "windows")]
+            { win32_is_maximized(self.window_id) }
+            #[cfg(not(target_os = "windows"))]
+            { false }
+        };
+        if self.fullscreen || maximized {
+            return Task::none();
+        }
+        let Some(id) = self.window_id else { return Task::none() };
+        let delta: f32 = if grow { PANEL_W } else { -PANEL_W };
+        let new_size = iced::Size::new(
+            (self.window_w_logical + delta).max(480.0),
+            self.window_h_logical,
+        );
+        iced::window::resize(id, new_size)
+    }
+
     fn toggle_panel(&mut self, kind: Option<PanelKind>) -> Task<Message> {
         let was_open = self.active_panel.is_some();
 
@@ -3124,23 +3182,22 @@ impl MpvNe {
         } else { Task::none() };
 
         if was_open != is_open {
-            let maximized = {
-                #[cfg(target_os = "windows")]
-                { win32_is_maximized(self.window_id) }
-                #[cfg(not(target_os = "windows"))]
-                { false }
-            };
-            if !self.fullscreen && !maximized {
-                if let Some(id) = self.window_id {
-                    let delta: f32 = if is_open { 280.0 } else { -280.0 };
-                    let new_size = iced::Size::new(
-                        (self.window_w_logical + delta).max(480.0),
-                        self.window_h_logical,
-                    );
-                    let resize_task = iced::window::resize(id, new_size);
-                    return Task::batch([resize_task, probe_task]);
+            // Detached: the panel isn't occupying any of the main window's
+            // width, so resizing it here would just be a spurious stretch -
+            // and the "open/close" button pressed from the main window's
+            // chrome has no docked target to affect. Treat it as closing
+            // the floating window instead (the button-name "open/close"
+            // implies fully dismissing it, same as the panel's own close).
+            if let Some(id) = self.panel_window_id {
+                if !is_open {
+                    self.panel_window_id = None;
+                    return Task::batch([iced::window::close(id), probe_task]);
                 }
+                return probe_task;
             }
+
+            let resize_task = self.resize_main_for_panel(is_open);
+            return Task::batch([resize_task, probe_task]);
         }
         probe_task
     }
@@ -3316,6 +3373,54 @@ impl MpvNe {
 /// Returns true when the iced application window is currently maximized.
 /// Uses `IsZoomed` from Win32 - no extra crate needed.
 #[cfg(target_os = "windows")]
+/// Shared edge-detection math for `MpvNe::cursor_edge_direction`/
+/// `panel_cursor_edge_direction` - which window it's for doesn't matter,
+/// just its cursor position and current size. Corner grip is larger than
+/// edge grip so diagonal resize is easy to land; both are tuned to be
+/// roughly equivalent to native Windows resize zones.
+fn edge_direction_for(cursor: (f32, f32), w: f32, h: f32) -> Option<iced::window::Direction> {
+    const EDGE_GRIP: f32 = 10.0;
+    const CORNER_GRIP: f32 = 16.0;
+    let (x, y) = cursor;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+
+    // Corners first - they win whenever both nearby axes are in range.
+    let near_l_c = x <= CORNER_GRIP;
+    let near_r_c = x >= w - CORNER_GRIP;
+    let near_t_c = y <= CORNER_GRIP;
+    let near_b_c = y >= h - CORNER_GRIP;
+    use iced::window::Direction::*;
+    if near_l_c && near_t_c {
+        return Some(NorthWest);
+    }
+    if near_r_c && near_t_c {
+        return Some(NorthEast);
+    }
+    if near_l_c && near_b_c {
+        return Some(SouthWest);
+    }
+    if near_r_c && near_b_c {
+        return Some(SouthEast);
+    }
+
+    // Otherwise: straight edges.
+    if x <= EDGE_GRIP {
+        return Some(West);
+    }
+    if x >= w - EDGE_GRIP {
+        return Some(East);
+    }
+    if y <= EDGE_GRIP {
+        return Some(North);
+    }
+    if y >= h - EDGE_GRIP {
+        return Some(South);
+    }
+    None
+}
+
 fn win32_is_maximized(window_id: Option<iced::window::Id>) -> bool {
     let _ = window_id; // kept for future use
     unsafe extern "system" {
@@ -3497,7 +3602,7 @@ fn on_window_event(
             // widget captures the click. The handler skips non-resize actions
             // when captured=true.
             let captured = matches!(status, iced::event::Status::Captured);
-            Some(Message::InputMouseDown(button, captured))
+            Some(Message::InputMouseDown(id, button, captured))
         }
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
             Some(Message::CursorMoved(id, position.x, position.y))

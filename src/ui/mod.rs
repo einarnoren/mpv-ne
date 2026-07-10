@@ -315,13 +315,18 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
         body.into()
     };
 
-    container(inner)
+    let outer = container(inner)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_| container::Style {
             background: Some(iced::Background::Color(BG_DEEPEST)),
             ..Default::default()
-        })
+        });
+
+    // Resize-cursor feedback, same as the main window's - it has no OS
+    // decorations either (custom chrome), so no OS-drawn resize handles.
+    EdgeGrips::new(outer)
+        .enabled(crate::app::USE_CUSTOM_TITLE_BAR)
         .into()
 }
 
