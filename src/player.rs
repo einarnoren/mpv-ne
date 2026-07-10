@@ -222,6 +222,8 @@ pub struct Player {
     pub gamma: i64,
     /// Our active labeled filters. Rebuilt and set atomically to avoid flicker.
     vf_slots: std::collections::HashMap<&'static str, String>,
+    /// Same idea as `vf_slots` but for the audio filter chain.
+    af_slots: std::collections::HashMap<&'static str, String>,
 }
 
 impl Player {
@@ -333,6 +335,7 @@ impl Player {
                 video_zoom: 0.0,
                 cache_time: 0.0,
                 vf_slots: std::collections::HashMap::new(),
+                af_slots: std::collections::HashMap::new(),
             }
         }
     }
@@ -385,10 +388,14 @@ impl Player {
         self.set_pause(true);
     }
 
-    pub fn seek(&mut self, pos: f64) {
+    /// `precise`: true = "absolute+exact" (land on the exact frame, slower
+    /// to respond since mpv decodes forward from the nearest keyframe);
+    /// false = "absolute+keyframes" (near-instant, but can land up to a
+    /// few seconds off). See `Settings::precise_seek`.
+    pub fn seek(&mut self, pos: f64, precise: bool) {
         self.position = pos;
-        // "absolute+exact" = seek to the precise timestamp, not nearest keyframe.
-        command(self.handle.0, &["seek", &pos.to_string(), "absolute+exact"]);
+        let mode = if precise { "absolute+exact" } else { "absolute+keyframes" };
+        command(self.handle.0, &["seek", &pos.to_string(), mode]);
     }
 
     /// Seek by `delta` seconds from the current position. mpv clamps for us.
@@ -491,6 +498,35 @@ impl Player {
         } else {
             command_str(self.handle.0, &format!("vf set {}", chain.join(",")));
         }
+    }
+
+    /// Set (or clear) a named audio filter slot - same pattern as `set_vf_slot`.
+    fn set_af_slot(&mut self, label: &'static str, spec: Option<String>) {
+        match spec {
+            Some(s) => { self.af_slots.insert(label, s); }
+            None    => { self.af_slots.remove(label); }
+        }
+        let chain: Vec<String> = self.af_slots.values().cloned().collect();
+        if chain.is_empty() {
+            command_str(self.handle.0, "af clr");
+        } else {
+            command_str(self.handle.0, &format!("af set {}", chain.join(",")));
+        }
+    }
+
+    /// Toggle dynamic audio normalization (ffmpeg's `dynaudnorm` filter) -
+    /// evens out volume swings between quiet and loud passages/tracks.
+    pub fn set_audio_normalize(&mut self, on: bool) {
+        self.set_af_slot("normalize", on.then_some("@mpvne_norm:lavfi=[dynaudnorm]".into()));
+    }
+
+    /// Preferred track languages (ISO 639 codes, e.g. "eng", comma-separated
+    /// for multiple in priority order). Only influences which track mpv
+    /// auto-selects - it takes effect at file load, not retroactively on
+    /// whatever's already playing. Pass `""` to clear a preference.
+    pub fn set_lang_priority(&self, audio_lang: &str, sub_lang: &str) {
+        set_opt_str(self.handle.0, "alang", audio_lang);
+        set_opt_str(self.handle.0, "slang", sub_lang);
     }
 
     pub fn set_rotate(&mut self, degrees: i64) {

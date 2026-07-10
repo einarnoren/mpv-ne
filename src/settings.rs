@@ -25,6 +25,24 @@ pub struct Settings {
     /// Screenshot save directory. Empty = mpv default.
     #[serde(default)]
     pub screenshot_dir: String,
+    /// Dynamic audio normalization (ffmpeg `dynaudnorm` filter).
+    #[serde(default)]
+    pub audio_normalize: bool,
+    /// Preferred audio track language (ISO 639 code, e.g. "eng"). Empty =
+    /// no preference (mpv picks its own default). Applied as mpv's `alang`
+    /// option, which only influences track auto-selection at file load.
+    #[serde(default)]
+    pub audio_lang: String,
+    /// Same as `audio_lang` but for subtitle tracks (mpv's `slang`).
+    #[serde(default)]
+    pub sub_lang: String,
+    /// When true (default), seeking lands on the exact frame requested
+    /// ("absolute+exact") - slower to respond while scrubbing since mpv
+    /// has to decode forward from the nearest keyframe. When false, seeks
+    /// snap to the nearest keyframe instead ("absolute+keyframes") - near
+    /// instant, but can land up to a few seconds off.
+    #[serde(default = "default_true")]
+    pub precise_seek: bool,
 }
 
 fn default_true() -> bool { true }

@@ -295,7 +295,81 @@ pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
     .into()
 }
 
-fn tabbed_panel(app: &MpvNe, active: PanelKind) -> Element<'_, Message> {
+/// Content of the popped-out side panel window (see `Message::DetachPanel`
+/// in app.rs). A genuine second OS window, same mechanism as the main-menu
+/// popup, but resizable/decorated so it behaves like a normal window
+/// instead of a borderless popup.
+pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
+    let active = app.active_panel.unwrap_or(PanelKind::Playlist);
+    let body = container(tabbed_panel(app, active, true))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_DEEPEST)),
+            ..Default::default()
+        });
+
+    let inner: Element<'_, Message> = if crate::app::USE_CUSTOM_TITLE_BAR {
+        column![panel_title_bar(), body].width(Length::Fill).height(Length::Fill).into()
+    } else {
+        body.into()
+    };
+
+    container(inner)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_DEEPEST)),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Slim custom title bar for the detached panel window - matches the main
+/// window's frameless chrome (see `ui::top_bar`) instead of showing the OS's
+/// native decorations, which would look out of place next to it.
+fn panel_title_bar<'a>() -> Element<'a, Message> {
+    let title_label = text("MPV-NE").size(12).color(TEXT_BRIGHT);
+
+    let drag_region = mouse_area(
+        container(title_label)
+            .padding([0, 8])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Vertical::Center),
+    )
+    .on_press(Message::PanelDragWindow);
+
+    let min_btn = icons::tipped(
+        icons::square_btn(icons::window_minimize()).on_press(Message::PanelMinimize),
+        "Minimize",
+    );
+    let max_btn = icons::tipped(
+        icons::square_btn(icons::window_maximize()).on_press(Message::PanelToggleMaximize),
+        "Maximize",
+    );
+    let close_btn = icons::tipped(
+        icons::square_btn(icons::window_close()).on_press(Message::ClosePanelWindow),
+        "Close panel",
+    );
+
+    container(
+        row![drag_region, min_btn, max_btn, close_btn]
+            .spacing(6)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
+    )
+    .padding(6)
+    .width(Length::Fill)
+    .height(Length::Fixed(36.0))
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(BG_SURFACE)),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, Message> {
     // Tab definitions: (label, kind).
     const TABS: &[(&str, PanelKind)] = &[
         ("Playlist", PanelKind::Playlist),
@@ -342,12 +416,23 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind) -> Element<'_, Message> {
             r = r.push(tipped_tab);
         }
 
-        // Collapse button with tooltip.
-        let close_btn = icons::tipped(
-            icons::square_btn(icons::panel_close()).on_press(Message::TogglePanel(active)),
-            "Close panel",
-        );
-        r = r.push(close_btn);
+        if detached {
+            let dock_btn = icons::tipped(
+                icons::square_btn(icons::dock()).on_press(Message::ReattachPanel),
+                "Dock panel back into the main window",
+            );
+            r = r.push(dock_btn);
+        } else {
+            let detach_btn = icons::tipped(
+                icons::square_btn(icons::detach()).on_press(Message::DetachPanel),
+                "Pop panel out into its own window",
+            );
+            let close_btn = icons::tipped(
+                icons::square_btn(icons::panel_close()).on_press(Message::TogglePanel(active)),
+                "Close panel",
+            );
+            r = r.push(detach_btn).push(close_btn);
+        }
 
         container(r)
             .width(Length::Fill)
@@ -517,26 +602,32 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .into()
     };
 
-    // When a panel is open: dock a tabbed panel to the right.
+    // When a panel is open AND not popped out into its own window: dock a
+    // tabbed panel to the right. If it's detached, the main window just
+    // shows the player - the panel itself renders in `panel_window_view`.
     let inner: Element<'_, Message> = if let Some(active_kind) = &app.active_panel {
-        let active_kind = *active_kind;
-        let panel = container(tabbed_panel(app, active_kind))
-            .width(Length::Fixed(SETTINGS_PANEL_W))
-            .height(Length::Fill)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_DEEPEST)),
-                border: iced::Border {
-                    color: BG_SURFACE,
-                    width: 1.0,
-                    radius: iced::border::Radius::new(0.0),
-                },
-                ..Default::default()
-            });
+        if app.panel_window_id.is_some() {
+            player_col
+        } else {
+            let active_kind = *active_kind;
+            let panel = container(tabbed_panel(app, active_kind, false))
+                .width(Length::Fixed(SETTINGS_PANEL_W))
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(BG_DEEPEST)),
+                    border: iced::Border {
+                        color: BG_SURFACE,
+                        width: 1.0,
+                        radius: iced::border::Radius::new(0.0),
+                    },
+                    ..Default::default()
+                });
 
-        row![player_col, panel]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            row![player_col, panel]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
     } else {
         player_col
     };

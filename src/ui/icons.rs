@@ -15,6 +15,9 @@ const ICON_SIZE: u16 = 18;
 const BTN_SIZE: f32 = 30.0;
 /// Default monochrome icon fill - slightly cool light grey.
 const ICON_HEX: &str = "#C5CDD9";
+/// Same color as `ICON_HEX`, as an `iced::Color` for SVG tint styling
+/// (see `square_toggle`) rather than baked into SVG source text.
+const ICON_COLOR: Color = Color::from_rgb(0.773, 0.804, 0.851);
 
 /// Standard idle 36×36 icon button.
 pub fn square_btn<'a, Message: Clone + 'a>(icon: Svg<'a>) -> Button<'a, Message> {
@@ -42,8 +45,11 @@ pub fn square_btn<'a, Message: Clone + 'a>(icon: Svg<'a>) -> Button<'a, Message>
 }
 
 /// Toggle button. When `active`, the background lights up in `active_color`
-/// (an aurora hue) so on/off state is unmistakable. The text colour is dark
-/// when active for contrast against the bright background.
+/// (an aurora hue) so on/off state is unmistakable. Unlike `text`, an `Svg`
+/// doesn't pick up the button's `text_color` automatically - its stroke
+/// color is baked into the SVG source - so the icon is explicitly re-tinted
+/// dark-on-active/light-on-idle here, or it all but disappears against a
+/// bright active background.
 pub fn square_toggle<'a, Message: Clone + 'a>(
     icon: Svg<'a>,
     active: bool,
@@ -70,6 +76,9 @@ pub fn square_toggle<'a, Message: Clone + 'a>(
             ..Default::default()
         }
     };
+    let icon = icon.style(move |_theme, _status| iced::widget::svg::Style {
+        color: Some(if active { BG_DEEPEST } else { ICON_COLOR }),
+    });
     button(icon)
         .width(Length::Fixed(BTN_SIZE))
         .height(Length::Fixed(BTN_SIZE))
@@ -321,6 +330,26 @@ pub fn hamburger<'a>() -> Svg<'a> {
 /// Grid / apps icon for the panels menu button.
 pub fn panels_menu<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Box with an arrow pointing out its top-right corner - pop a panel out
+/// into its own window.
+pub fn detach<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Box with an arrow pointing into it - dock a detached panel back into
+/// the main window.
+pub fn dock<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="21 9 21 3 15 3"/><line x1="10" y1="14" x2="21" y2="3"/></g>"##;
     let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
     svg(svg::Handle::from_memory(xml.into_bytes()))
         .width(Length::Fixed(ICON_SIZE as f32))

@@ -2,7 +2,7 @@
 
 use iced::{
     Alignment, Element, Length, Radians,
-    widget::{button, column, container, row, scrollable, slider, text, Space},
+    widget::{button, column, container, row, scrollable, slider, text, text_input, Space},
 };
 
 use super::{
@@ -25,22 +25,25 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
     let content = column![
         // ── Playback ──────────────────────────────────────────────
+        category("Playback"),
         section("Speed", speed_row(app)),
         gap(),
         section("Options", options_row(app)),
         gap(),
-        // ── Sync ──────────────────────────────────────────────────
-        section("Subtitle delay", delay_row(
-            app.player.sub_delay,
-            Message::SubDelayAdjust(-0.5),
-            Message::SubDelayAdjust(-0.1),
-            Message::SubDelayReset,
-            Message::SubDelayAdjust(0.1),
-            Message::SubDelayAdjust(0.5),
-            "s",
-        )),
+        section("Seeking", row![
+            toggle_btn(
+                if app.precise_seek { "Precise (exact)" } else { "Fast (keyframe)" },
+                app.precise_seek,
+                Message::TogglePreciseSeek,
+                AURORA_TEAL,
+            ),
+        ].into()),
         gap(),
-        section("Audio delay", delay_row(
+        // ── Audio ─────────────────────────────────────────────────
+        category("Audio"),
+        section("Track", audio_track_list(app)),
+        gap(),
+        section_sub("Audio sync", "Shift audio earlier/later, relative to video", delay_row(
             app.player.audio_delay,
             Message::AudioDelayAdjust(-0.5),
             Message::AudioDelayAdjust(-0.1),
@@ -50,40 +53,113 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             "s",
         )),
         gap(),
-        // ── Video equalizer ───────────────────────────────────────
-        section("Video equalizer", eq_rows(app)),
+        section("Mute", row![
+            toggle_btn(
+                if app.player.muted { "Muted" } else { "Mute" },
+                app.player.muted,
+                Message::ToggleMute,
+                AURORA_PURPLE,
+            ),
+        ].into()),
+        gap(),
+        section_sub(
+            "Normalization",
+            "Evens out volume swings between quiet and loud passages",
+            row![
+                toggle_btn(
+                    if app.audio_normalize { "On" } else { "Off" },
+                    app.audio_normalize,
+                    Message::ToggleAudioNormalize,
+                    AURORA_GREEN,
+                ),
+            ].into(),
+        ),
+        gap(),
+        section_sub(
+            "Preferred language",
+            "ISO code, e.g. \"eng\" - picked automatically when a file loads",
+            lang_input(&app.audio_lang, Message::AudioLangInput),
+        ),
         gap(),
         // ── Subtitles ─────────────────────────────────────────────
-        section("Subtitle appearance", sub_appearance_rows(app)),
+        category("Subtitles"),
+        section("Track", sub_track_list(app)),
         gap(),
-        // ── Aspect ratio ──────────────────────────────────────────
-        section("Aspect ratio", aspect_row()),
+        section_sub("Subtitle sync", "Shift subtitles earlier/later, relative to audio", delay_row(
+            app.player.sub_delay,
+            Message::SubDelayAdjust(-0.5),
+            Message::SubDelayAdjust(-0.1),
+            Message::SubDelayReset,
+            Message::SubDelayAdjust(0.1),
+            Message::SubDelayAdjust(0.5),
+            "s",
+        )),
         gap(),
-        // ── Video zoom ────────────────────────────────────────────
-        section("Video zoom", zoom_row(app)),
+        section("Appearance", sub_appearance_rows(app)),
         gap(),
-        // ── Subtitle ──────────────────────────────────────────────
-        section("Subtitles", column![
+        section("Visibility", row![
+            toggle_btn(
+                if app.player.sub_visible { "Shown" } else { "Hidden" },
+                app.player.sub_visible,
+                Message::ToggleSubVisibility,
+                AURORA_TEAL,
+            ),
+        ].into()),
+        gap(),
+        section_sub(
+            "Preferred language",
+            "ISO code, e.g. \"eng\" - picked automatically when a file loads",
+            lang_input(&app.sub_lang, Message::SubLangInput),
+        ),
+        gap(),
+        section("Load", column![
             action_btn("Open subtitle file...", Message::LoadSubtitle, AURORA_TEAL),
             action_btn("Search OpenSubtitles…",  Message::OpenSubSearch, AURORA_GREEN),
         ].spacing(4).into()),
         gap(),
-        // ── Video transform ───────────────────────────────────────
+        // ── Video ─────────────────────────────────────────────────
+        category("Video"),
+        section("Frame fit", row![
+            button(text(format!("{} (cycle)", app.frame_mode.label())).size(12).color(TEXT_BRIGHT))
+                .padding([5, 10])
+                .style(|_, status| {
+                    use iced::widget::button::Status;
+                    let bg = match status {
+                        Status::Hovered | Status::Pressed => BG_HOVER,
+                        _ => BG_BUTTON,
+                    };
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
+                        ..Default::default()
+                    }
+                })
+                .on_press(Message::CycleFrameMode),
+        ].into()),
+        gap(),
+        section("Equalizer", eq_rows(app)),
+        gap(),
+        section("Aspect ratio", aspect_row()),
+        gap(),
+        section("Zoom", zoom_row(app)),
+        gap(),
         section("Rotate / flip", transform_row(app)),
         gap(),
-        // ── After playback ────────────────────────────────────────
-        section("After playback", after_playback_row(app)),
+        section("Window size", window_size_row(app)),
         gap(),
-        // ── Open URL / Jump ───────────────────────────────────────
+        // ── Playback control ─────────────────────────────────────
+        category("Playback control"),
+        section("AB repeat", ab_row(app)),
+        gap(),
         section("Navigate", column![
             action_btn("Open URL / stream...", Message::OpenUrl,    AURORA_TEAL),
             action_btn("Jump to time (Ctrl+G)", Message::JumpToTime, AURORA_TEAL),
         ].spacing(4).into()),
         gap(),
-        // ── AB repeat ─────────────────────────────────────────────
-        section("AB repeat", ab_row(app)),
+        section("After playback", after_playback_row(app)),
         gap(),
-        // ── Screenshot ────────────────────────────────────────────
+        // ── Other ─────────────────────────────────────────────────
+        category("Other"),
         section("Screenshot", screenshot_section(app)),
     ]
     .spacing(0)
@@ -431,6 +507,48 @@ fn transform_row(app: &MpvNe) -> Element<'_, Message> {
     .into()
 }
 
+/// Resize the app window to match the video's resolution - compact version
+/// of the fit-to-scale popup on the controls bar (same messages, fewer
+/// options to fit a narrow settings panel).
+fn window_size_row(app: &MpvNe) -> Element<'_, Message> {
+    let btn = |label: String, msg: Message| {
+        button(text(label).size(11).color(TEXT_BRIGHT))
+            .padding([4, 8])
+            .style(|_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    _ => BG_BUTTON,
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
+                    ..Default::default()
+                }
+            })
+            .on_press(msg)
+    };
+
+    let has_video = app.player.width > 0 && app.player.height > 0;
+    if !has_video {
+        return text("No video loaded").size(11).color(TEXT_MUTED).into();
+    }
+
+    column![
+        row![
+            btn("Fit to visible".into(), Message::FitToVisible),
+            btn("Native (100%)".into(), Message::FitToScale(1.0)),
+        ].spacing(4),
+        row![
+            btn("50%".into(), Message::FitToScale(0.5)),
+            btn("150%".into(), Message::FitToScale(1.5)),
+            btn("200%".into(), Message::FitToScale(2.0)),
+        ].spacing(4),
+    ]
+    .spacing(6)
+    .into()
+}
+
 fn after_playback_row(app: &MpvNe) -> Element<'_, Message> {
     let opt = |label: &'static str, val: AfterPlayback| {
         let active = app.after_playback == val;
@@ -553,6 +671,80 @@ fn ab_row(app: &MpvNe) -> Element<'_, Message> {
     .into()
 }
 
+/// Track-select pill button, shared shape for both audio and subtitle lists.
+fn track_btn<'a>(label: &str, active: bool, msg: Message, color: iced::Color) -> Element<'a, Message> {
+    button(text(label.to_string()).size(11).color(if active { color } else { TEXT_MUTED }))
+        .padding([4, 8])
+        .width(Length::Fill)
+        .style(move |_, status| {
+            use iced::widget::button::Status;
+            let bg = match status {
+                Status::Hovered | Status::Pressed => BG_HOVER,
+                _ => if active { BG_HOVER } else { BG_BUTTON },
+            };
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(bg)),
+                border: iced::Border {
+                    radius: iced::border::Radius::new(4.0),
+                    color: if active { color } else { iced::Color::TRANSPARENT },
+                    width: if active { 1.0 } else { 0.0 },
+                },
+                ..Default::default()
+            }
+        })
+        .on_press(msg)
+        .into()
+}
+
+fn audio_track_list(app: &MpvNe) -> Element<'_, Message> {
+    if app.player.audio_tracks.is_empty() {
+        return text("No audio tracks").size(11).color(TEXT_MUTED).into();
+    }
+    let rows = app.player.audio_tracks.iter().map(|t| {
+        track_btn(&t.label, t.id == app.player.current_aid, Message::AudioTrackSelected(t.clone()), AURORA_PURPLE)
+    });
+    column(rows).spacing(4).into()
+}
+
+fn sub_track_list(app: &MpvNe) -> Element<'_, Message> {
+    if app.player.sub_tracks.is_empty() {
+        return text("No subtitle tracks").size(11).color(TEXT_MUTED).into();
+    }
+    let rows = app.player.sub_tracks.iter().map(|t| {
+        track_btn(&t.label, t.id == app.player.current_sid, Message::SubTrackSelected(t.clone()), AURORA_TEAL)
+    });
+    column(rows).spacing(4).into()
+}
+
+/// Small text field for a 3-letter-ish language code (e.g. "eng"), used for
+/// both the audio and subtitle preferred-language settings.
+fn lang_input<'a>(value: &str, on_input: impl Fn(String) -> Message + 'a) -> Element<'a, Message> {
+    text_input("e.g. eng", value)
+        .on_input(on_input)
+        .padding([5, 8])
+        .size(12)
+        .width(Length::Fixed(90.0))
+        .style(|_, status| {
+            use iced::widget::text_input::Status;
+            iced::widget::text_input::Style {
+                background: iced::Background::Color(BG_BUTTON),
+                border: iced::Border {
+                    color: match status {
+                        Status::Focused { .. } => AURORA_TEAL,
+                        _ => BG_HOVER,
+                    },
+                    width: 1.0,
+                    radius: iced::border::Radius::new(4.0),
+                },
+                icon: TEXT_MUTED,
+                placeholder: TEXT_MUTED,
+                value: TEXT_BRIGHT,
+                selection: iced::Color { a: 0.3, ..AURORA_TEAL },
+            }
+        })
+        .into()
+}
+
 fn screenshot_section(app: &MpvNe) -> Element<'_, Message> {
     let dir_label = if app.screenshot_dir.is_empty() {
         "Default folder".to_string()
@@ -581,7 +773,7 @@ fn screenshot_section(app: &MpvNe) -> Element<'_, Message> {
 fn section<'a>(label: &'static str, content: Element<'a, Message>) -> Element<'a, Message> {
     container(
         column![
-            text(label).size(11).color(TEXT_MUTED),
+            text(label).size(13).color(TEXT_BRIGHT),
             content,
         ]
         .spacing(8),
@@ -592,6 +784,38 @@ fn section<'a>(label: &'static str, content: Element<'a, Message>) -> Element<'a
         background: Some(iced::Background::Color(BG_SURFACE)),
         ..Default::default()
     })
+    .into()
+}
+
+/// Same as `section`, plus a small muted line clarifying what the setting
+/// actually does - used where the label alone is easy to mix up with a
+/// similarly-named neighbor (e.g. "Audio sync" vs. "Subtitle sync").
+fn section_sub<'a>(label: &'static str, subtext: &'static str, content: Element<'a, Message>) -> Element<'a, Message> {
+    container(
+        column![
+            text(label).size(13).color(TEXT_BRIGHT),
+            text(subtext).size(10).color(TEXT_MUTED),
+            content,
+        ]
+        .spacing(6),
+    )
+    .padding([12, 14])
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(BG_SURFACE)),
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Category divider: a bold label above a group of related sections
+/// (Playback / Audio / Subtitles / Video / Playback control / Other).
+fn category<'a>(label: &'static str) -> Element<'a, Message> {
+    container(
+        text(label.to_uppercase()).size(12).color(AURORA_TEAL),
+    )
+    .padding(iced::Padding { top: 16.0, bottom: 6.0, left: 14.0, right: 14.0 })
+    .width(Length::Fill)
     .into()
 }
 

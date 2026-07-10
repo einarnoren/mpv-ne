@@ -122,7 +122,7 @@ impl FrameMode {
             FrameMode::Stretch => FrameMode::Fit,
         }
     }
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             FrameMode::Fit => "Fit",
             FrameMode::Fill => "Fill",
@@ -299,6 +299,15 @@ pub struct MpvNe {
     /// Existing history from before it was enabled still reads normally;
     /// only new writes are suppressed.
     pub private_mode: bool,
+    /// Dynamic audio normalization (ffmpeg `dynaudnorm`). See `Settings::audio_normalize`.
+    pub audio_normalize: bool,
+    /// Preferred audio/subtitle track languages (ISO 639 codes, e.g. "eng").
+    /// Empty = no preference. See `Settings::audio_lang`/`sub_lang`.
+    pub audio_lang: String,
+    pub sub_lang: String,
+    /// Whether seeking lands on the exact frame ("precise") or the nearest
+    /// keyframe (faster, less exact). See `Settings::precise_seek`.
+    pub precise_seek: bool,
     pub screenshot_dir: String,
     /// Suppresses the next volume OSD (used when restoring saved volume at startup).
     suppress_volume_osd: bool,
@@ -337,6 +346,11 @@ pub struct MpvNe {
     /// whenever the popup's height changes, without drifting from repeated
     /// re-clamping of an already-clamped position.
     menu_anchor: Option<(f32, f32)>,
+    /// The docked side panel (Playlist/Browser/Recent/Settings), popped out
+    /// into its own resizable/movable OS window instead of docked to the
+    /// main window. `None` = docked (normal). `active_panel` still tracks
+    /// which tab is showing either way - this only changes where it's drawn.
+    pub panel_window_id: Option<iced::window::Id>,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -425,7 +439,7 @@ pub struct MpvNe {
 
 impl Default for MpvNe {
     fn default() -> Self {
-        Self {
+        let mut app = Self {
             player: Player::default(),
             current_frame: None,
             pending_w: 0,
@@ -472,6 +486,10 @@ impl Default for MpvNe {
                 s.resume_enabled
             },
             private_mode: false,
+            audio_normalize: crate::settings::Settings::load().audio_normalize,
+            audio_lang: crate::settings::Settings::load().audio_lang,
+            sub_lang: crate::settings::Settings::load().sub_lang,
+            precise_seek: crate::settings::Settings::load().precise_seek,
             screenshot_dir: crate::settings::Settings::load().screenshot_dir,
             suppress_volume_osd: false,
             suppress_speed_osd: true, // suppress the startup 1x event
@@ -494,6 +512,7 @@ impl Default for MpvNe {
             menu_window_id: None,
             menu_section_open: [false, false],
             menu_anchor: None,
+            panel_window_id: None,
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
@@ -521,7 +540,10 @@ impl Default for MpvNe {
             thumb_pending_id: 0,
             pre_fullscreen_w: None,
             pre_fullscreen_h: None,
-        }
+        };
+        app.player.set_audio_normalize(app.audio_normalize);
+        app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
+        app
     }
 }
 
@@ -583,6 +605,10 @@ pub enum Message {
     TogglePin,
     TogglePip,
     TogglePrivateMode,
+    ToggleAudioNormalize,
+    AudioLangInput(String),
+    SubLangInput(String),
+    TogglePreciseSeek,
     FitToVisible,
     FitToScale(f32),
     FitToHeight(u32),
@@ -706,6 +732,23 @@ pub enum Message {
     /// section was toggled, once the main window's live DPI is known
     /// (popup id, anchor_x, anchor_y, height, dpi).
     RepositionMenuPopup(iced::window::Id, f32, f32, f32, f32),
+    /// Pop the docked side panel out into its own OS window.
+    DetachPanel,
+    /// Dock the popped-out side panel back into the main window, keeping it
+    /// open (the panel's own "dock" button - a deliberate opposite of
+    /// `DetachPanel`, distinct from actually closing the panel).
+    ReattachPanel,
+    /// Fully close the panel (whether docked or detached) - closes the
+    /// floating window too, if one is open. Triggered by the detached
+    /// window's own close button/titlebar X and by the OS close request,
+    /// as opposed to `ReattachPanel` which keeps the panel open but docked.
+    ClosePanelWindow,
+    /// Custom-chrome window controls for the detached panel window - same
+    /// idea as MinimizeWindow/DragWindow/ToggleMaximize but targeting
+    /// `panel_window_id` instead of the hardcoded main `window_id`.
+    PanelMinimize,
+    PanelDragWindow,
+    PanelToggleMaximize,
     // Video zoom
     VideoZoomSet(f64),
     VideoZoomReset,
@@ -861,7 +904,7 @@ impl MpvNe {
             Message::Seek(pos) => {
                 self.live_catching_up = false;
                 self.live_edge_paused = false;
-                self.player.seek(pos);
+                self.player.seek(pos, self.precise_seek);
             }
             Message::VolumeChanged(vol) => {
                 self.player.set_volume(vol);
@@ -985,6 +1028,10 @@ impl MpvNe {
                             resume_enabled: self.resume_enabled,
                             volume: self.player.volume,
                             screenshot_dir: self.screenshot_dir.clone(),
+                            audio_normalize: self.audio_normalize,
+                            audio_lang: self.audio_lang.clone(),
+                            sub_lang: self.sub_lang.clone(),
+                            precise_seek: self.precise_seek,
                         }
                         .save();
                     }
@@ -1009,7 +1056,7 @@ impl MpvNe {
                 // AB repeat: snap back to A when position passes B.
                 if let (Some(a), Some(b)) = (self.ab_loop_a, self.ab_loop_b) {
                     if pos >= b {
-                        self.player.seek(a);
+                        self.player.seek(a, true); // loop point - always exact
                     }
                 }
             }
@@ -1235,7 +1282,7 @@ impl MpvNe {
             Message::JumpToBookmark(pos) => {
                 self.live_catching_up = false;
                 self.live_edge_paused = false;
-                self.player.seek(pos);
+                self.player.seek(pos, true); // deliberate jump - always exact
             }
             Message::LiveEdgeTick => {
                 // mpv's demuxer doesn't fire DurationChanged while keep-open pauses
@@ -1629,7 +1676,7 @@ impl MpvNe {
             }
 
             Message::ResumePosition(pos) => {
-                self.player.seek(pos);
+                self.player.seek(pos, true); // startup resume - always exact
                 return Task::done(Message::ShowOsd(format!("Resuming from {}", fmt_time(pos))));
             }
 
@@ -2036,6 +2083,46 @@ impl MpvNe {
                     iced::window::move_to(win_id, iced::Point::new(x, y)),
                 ]);
             }
+            Message::DetachPanel => {
+                if self.active_panel.is_some() && self.panel_window_id.is_none() {
+                    let settings = iced::window::Settings {
+                        size: iced::Size::new(320.0, 640.0),
+                        resizable: true,
+                        decorations: !USE_CUSTOM_TITLE_BAR,
+                        exit_on_close_request: false,
+                        ..Default::default()
+                    };
+                    let (id, open_task) = iced::window::open(settings);
+                    self.panel_window_id = Some(id);
+                    return open_task.discard();
+                }
+            }
+            Message::ReattachPanel => {
+                if let Some(id) = self.panel_window_id.take() {
+                    return iced::window::close(id);
+                }
+            }
+            Message::ClosePanelWindow => {
+                self.active_panel = None;
+                if let Some(id) = self.panel_window_id.take() {
+                    return iced::window::close(id);
+                }
+            }
+            Message::PanelMinimize => {
+                if let Some(id) = self.panel_window_id {
+                    return iced::window::minimize(id, true);
+                }
+            }
+            Message::PanelToggleMaximize => {
+                if let Some(id) = self.panel_window_id {
+                    return iced::window::toggle_maximize(id);
+                }
+            }
+            Message::PanelDragWindow => {
+                if let Some(id) = self.panel_window_id {
+                    return iced::window::drag(id);
+                }
+            }
             Message::OpenFileLocation(path) => {
                 self.file_context_menu = None;
                 if let Some(dir) = path.parent() {
@@ -2256,6 +2343,8 @@ impl MpvNe {
                     return Task::batch([iced::window::close(id), iced::exit()]);
                 } else if Some(id) == self.menu_window_id {
                     return self.close_main_menu();
+                } else if Some(id) == self.panel_window_id {
+                    return Task::done(Message::ClosePanelWindow);
                 }
             }
 
@@ -2479,6 +2568,33 @@ impl MpvNe {
                     "Private mode off"
                 };
                 return Task::done(Message::ShowOsd(label.into()));
+            }
+            Message::ToggleAudioNormalize => {
+                self.audio_normalize = !self.audio_normalize;
+                self.player.set_audio_normalize(self.audio_normalize);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio_normalize = self.audio_normalize;
+                prefs.save();
+            }
+            Message::AudioLangInput(s) => {
+                self.audio_lang = s;
+                self.player.set_lang_priority(&self.audio_lang, &self.sub_lang);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio_lang = self.audio_lang.clone();
+                prefs.save();
+            }
+            Message::SubLangInput(s) => {
+                self.sub_lang = s;
+                self.player.set_lang_priority(&self.audio_lang, &self.sub_lang);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.sub_lang = self.sub_lang.clone();
+                prefs.save();
+            }
+            Message::TogglePreciseSeek => {
+                self.precise_seek = !self.precise_seek;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.precise_seek = self.precise_seek;
+                prefs.save();
             }
             Message::ToggleChrome => {
                 let was_visible = self.chrome_visible();
@@ -2770,6 +2886,8 @@ impl MpvNe {
     pub fn view(&self, window: iced::window::Id) -> Element<'_, Message> {
         if Some(window) == self.menu_window_id {
             ui::menu_window_view(self)
+        } else if Some(window) == self.panel_window_id {
+            ui::panel_window_view(self)
         } else {
             ui::view(self)
         }
