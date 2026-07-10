@@ -293,6 +293,12 @@ pub struct MpvNe {
     pub after_playback: AfterPlayback,
     pub modal: Option<ModalDialog>,
     pub resume_enabled: bool,
+    /// Private/no-trace mode: while on, resume position, recent files, and
+    /// per-file memory (audio/subtitle track, volume, bookmarks) stop being
+    /// written to disk for the session - see ResumeDb/RecentFiles::private.
+    /// Existing history from before it was enabled still reads normally;
+    /// only new writes are suppressed.
+    pub private_mode: bool,
     pub screenshot_dir: String,
     /// Suppresses the next volume OSD (used when restoring saved volume at startup).
     suppress_volume_osd: bool,
@@ -322,6 +328,15 @@ pub struct MpvNe {
     /// like a native right-click menu. `None` when closed. See
     /// `open_main_menu`/`close_main_menu` and `MpvNe::view`.
     pub menu_window_id: Option<iced::window::Id>,
+    /// Collapsed/expanded state of the main-menu popup's collapsible
+    /// sections (0 = Playback, 1 = Video & Audio). Collapsed by default to
+    /// keep the popup short; see `ui::menu_rows`/`ui::menu_window_height`.
+    pub menu_section_open: [bool; 2],
+    /// Screen-space anchor point the popup was opened at (unclamped), kept
+    /// so `ToggleMenuSection` can re-clamp against the monitor work area
+    /// whenever the popup's height changes, without drifting from repeated
+    /// re-clamping of an already-clamped position.
+    menu_anchor: Option<(f32, f32)>,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -336,6 +351,13 @@ pub struct MpvNe {
     pub browser_path: Option<std::path::PathBuf>,
     /// Cached entries for the current browser directory.
     pub browser_entries: Vec<BrowserEntry>,
+    /// Locations visited before the current one, most-recent-last - popped
+    /// by the Back button. `None` entries mean the drives list. Separate
+    /// from "up to parent folder", which is just a shortcut to a specific
+    /// relative location, not true navigation history (e.g. jumping to a
+    /// different drive and wanting to return to where you just were isn't
+    /// "up" from anywhere).
+    pub browser_back_stack: Vec<Option<std::path::PathBuf>>,
     /// Resume position database (loaded once at startup).
     pub resume_db: ResumeDb,
     /// Recently opened files (most-recent-first).
@@ -444,6 +466,7 @@ impl Default for MpvNe {
                 let s = crate::settings::Settings::load();
                 s.resume_enabled
             },
+            private_mode: false,
             screenshot_dir: crate::settings::Settings::load().screenshot_dir,
             suppress_volume_osd: false,
             suppress_speed_osd: true, // suppress the startup 1x event
@@ -464,12 +487,15 @@ impl Default for MpvNe {
             playlist_sort_open: false,
             file_context_menu: None,
             menu_window_id: None,
+            menu_section_open: [false, false],
+            menu_anchor: None,
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
             last_panel: PanelKind::Playlist,
             browser_path: None,
             browser_entries: Vec::new(),
+            browser_back_stack: Vec::new(),
             resume_db: ResumeDb::load(),
             recent_files: RecentFiles::load(),
             ab_loop_a: None,
@@ -550,6 +576,7 @@ pub enum Message {
     ToggleMaximize,
     TogglePin,
     TogglePip,
+    TogglePrivateMode,
     FitToVisible,
     FitToScale(f32),
     FitToHeight(u32),
@@ -577,6 +604,7 @@ pub enum Message {
     BrowserNavigate(std::path::PathBuf),
     BrowserNavigateUp,
     BrowserGoToDrives,
+    BrowserBack,
     BrowserOpen(std::path::PathBuf),
     // Playlist
     PlaylistJump(usize),
@@ -661,6 +689,16 @@ pub enum Message {
     /// menu and then forward the real message, instead of every action
     /// handler (TogglePause, CycleAudio, …) needing to know about the menu.
     VideoMenuAction(Box<Message>),
+    /// Expand/collapse a collapsible section in the main-menu popup (does
+    /// NOT close the popup, unlike `VideoMenuAction`).
+    ToggleMenuSection(usize),
+    /// Internal: actually open the main-menu popup window, once the main
+    /// window's live DPI is known (screen_x, screen_y, height, dpi).
+    OpenMenuPopup(f32, f32, f32, f32),
+    /// Internal: resize/reposition an already-open main-menu popup after a
+    /// section was toggled, once the main window's live DPI is known
+    /// (popup id, anchor_x, anchor_y, height, dpi).
+    RepositionMenuPopup(iced::window::Id, f32, f32, f32, f32),
     // Video zoom
     VideoZoomSet(f64),
     VideoZoomReset,
@@ -1527,8 +1565,7 @@ impl MpvNe {
             }
 
             Message::BrowserNavigate(path) => {
-                self.browser_entries = browser_read_dir(&path);
-                self.browser_path = Some(path);
+                self.browser_go(Some(path));
                 let paths: Vec<_> = self.browser_entries.iter()
                     .filter(|e| !e.is_dir).map(|e| e.path.clone()).collect();
                 if !paths.is_empty() {
@@ -1536,33 +1573,31 @@ impl MpvNe {
                 }
             }
             Message::BrowserNavigateUp => {
-                if let Some(ref cur) = self.browser_path.clone() {
-                    match cur.parent() {
-                        Some(p) if p != cur => {
-                            let p = p.to_path_buf();
-                            self.browser_entries = browser_read_dir(&p);
-                            self.browser_path = Some(p);
-                        }
-                        _ => {
-                            // Already at root - go to drives list.
-                            self.browser_path = None;
-                            self.browser_entries = browser_drives();
-                        }
-                    }
-                } else {
-                    // Already at drives.
-                    self.browser_entries = browser_drives();
-                }
+                let target = match &self.browser_path {
+                    Some(cur) => match cur.parent() {
+                        Some(p) if p != cur.as_path() => Some(p.to_path_buf()),
+                        _ => None, // already at root - go to drives list
+                    },
+                    None => None, // already at drives
+                };
+                self.browser_go(target);
             }
             Message::BrowserGoToDrives => {
-                self.browser_path = None;
-                self.browser_entries = browser_drives();
+                self.browser_go(None);
+            }
+            Message::BrowserBack => {
+                if let Some(target) = self.browser_back_stack.pop() {
+                    self.browser_path = target;
+                    self.browser_entries = match &self.browser_path {
+                        Some(p) => browser_read_dir(p),
+                        None => browser_drives(),
+                    };
+                }
             }
             Message::BrowserOpen(path) => {
                 // Update browser to show the file's directory first.
                 if let Some(dir) = path.parent() {
-                    self.browser_path = Some(dir.to_path_buf());
-                    self.browser_entries = browser_read_dir(dir);
+                    self.browser_go(Some(dir.to_path_buf()));
                 }
                 self.load_path(path);
             }
@@ -1945,6 +1980,43 @@ impl MpvNe {
             Message::VideoMenuAction(inner) => {
                 let close = self.close_main_menu();
                 return Task::batch([close, Task::done(*inner)]);
+            }
+            Message::ToggleMenuSection(idx) => {
+                if idx < self.menu_section_open.len() {
+                    self.menu_section_open[idx] = !self.menu_section_open[idx];
+                }
+                if let (Some(win_id), Some((ax, ay)), Some(main_id)) =
+                    (self.menu_window_id, self.menu_anchor, self.window_id)
+                {
+                    let height = ui::menu_window_height(self);
+                    return iced::window::scale_factor(main_id)
+                        .map(move |dpi| Message::RepositionMenuPopup(win_id, ax, ay, height, dpi));
+                }
+            }
+            Message::OpenMenuPopup(screen_x, screen_y, height, dpi) => {
+                let width = 224.0;
+                let (x, y) = self.clamp_menu_pos(screen_x, screen_y, width, height, dpi);
+                let settings = iced::window::Settings {
+                    size: iced::Size::new(width, height),
+                    position: iced::window::Position::Specific(iced::Point::new(x, y)),
+                    resizable: false,
+                    decorations: false,
+                    transparent: true,
+                    level: iced::window::Level::AlwaysOnTop,
+                    exit_on_close_request: false,
+                    ..Default::default()
+                };
+                let (id, open_task) = iced::window::open(settings);
+                self.menu_window_id = Some(id);
+                return open_task.discard();
+            }
+            Message::RepositionMenuPopup(win_id, ax, ay, height, dpi) => {
+                let width = 224.0;
+                let (x, y) = self.clamp_menu_pos(ax, ay, width, height, dpi);
+                return Task::batch([
+                    iced::window::resize(win_id, iced::Size::new(width, height)),
+                    iced::window::move_to(win_id, iced::Point::new(x, y)),
+                ]);
             }
             Message::OpenFileLocation(path) => {
                 self.file_context_menu = None;
@@ -2379,6 +2451,17 @@ impl MpvNe {
                 tasks.push(resize_and_move);
                 return Task::batch(tasks);
             }
+            Message::TogglePrivateMode => {
+                self.private_mode = !self.private_mode;
+                self.resume_db.set_private(self.private_mode);
+                self.recent_files.set_private(self.private_mode);
+                let label = if self.private_mode {
+                    "Private mode on - nothing will be remembered"
+                } else {
+                    "Private mode off"
+                };
+                return Task::done(Message::ShowOsd(label.into()));
+            }
             Message::ToggleChrome => {
                 let was_visible = self.chrome_visible();
                 self.chrome_force_hidden = !self.chrome_force_hidden;
@@ -2675,40 +2758,53 @@ impl MpvNe {
     }
 
     /// Open the floating main-menu popup at the given *screen* coordinates
-    /// (not window-relative - the popup is a separate OS window). iced has
-    /// no way to ask "how tall would this content actually render" from
-    /// outside the render pass, so the height is a row-count-based estimate
-    /// (~30px/item, 1px/divider, 1px column spacing between every row, 2px
-    /// border) matching `menu_window_view`'s exact row counts for each
-    /// media state - keep these in sync if that function's item list changes.
+    /// (not window-relative - the popup is a separate OS window). Height is
+    /// estimated from the current (collapsed-by-default) row list via
+    /// `ui::menu_window_height`, and the position is clamped to the nearest
+    /// monitor's work area so the popup never extends off-screen.
     fn open_main_menu(&mut self, screen_x: f32, screen_y: f32) -> Task<Message> {
-        let has_media = self.player.path.is_some();
-        // +1 item vs the original estimate (Picture-in-Picture, in the
-        // always-shown Window section) - bump both by ~30px accordingly.
-        let height = if has_media { 850.0 } else { 430.0 };
-        let settings = iced::window::Settings {
-            size: iced::Size::new(224.0, height),
-            position: iced::window::Position::Specific(iced::Point::new(screen_x, screen_y)),
-            resizable: false,
-            decorations: false,
-            transparent: true,
-            level: iced::window::Level::AlwaysOnTop,
-            exit_on_close_request: false,
-            ..Default::default()
-        };
-        let (id, open_task) = iced::window::open(settings);
-        self.menu_window_id = Some(id);
-        open_task.discard()
+        self.menu_section_open = [false, false];
+        self.menu_anchor = Some((screen_x, screen_y));
+        let height = ui::menu_window_height(self);
+        let Some(main_id) = self.window_id else { return Task::none() };
+        iced::window::scale_factor(main_id)
+            .map(move |dpi| Message::OpenMenuPopup(screen_x, screen_y, height, dpi))
     }
 
     /// Close the floating main-menu popup, if open. Safe to call when it's
     /// already closed.
     fn close_main_menu(&mut self) -> Task<Message> {
+        self.menu_anchor = None;
         if let Some(id) = self.menu_window_id.take() {
             iced::window::close(id)
         } else {
             Task::none()
         }
+    }
+
+    /// Clamp a popup top-left position + size so it stays fully within the
+    /// work area of the monitor nearest `(x, y)`, shifting up/left rather
+    /// than letting the far edge run off-screen. `(x, y)`, `w`/`h`, and the
+    /// returned point are logical coordinates (matching `window_x_logical`
+    /// and `iced::window::Position::Specific`); `work_area_near` returns
+    /// physical pixels, so its bounds are converted via `dpi` before
+    /// comparing - see `Message::TogglePip` for the same conversion.
+    fn clamp_menu_pos(&self, x: f32, y: f32, w: f32, h: f32, dpi: f32) -> (f32, f32) {
+        #[cfg(target_os = "windows")]
+        let (wa_l, wa_t, wa_r, wa_b) = {
+            let (l, t, r, b) = crate::win32_modal::work_area_near((x * dpi) as i32, (y * dpi) as i32);
+            (l as f32 / dpi, t as f32 / dpi, r as f32 / dpi, b as f32 / dpi)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let (wa_l, wa_t, wa_r, wa_b): (f32, f32, f32, f32) = (0.0, 0.0, 1920.0, 1080.0);
+
+        let mut nx = x;
+        let mut ny = y;
+        if ny + h > wa_b { ny = wa_b - h; }
+        if nx + w > wa_r { nx = wa_r - w; }
+        if ny < wa_t { ny = wa_t; }
+        if nx < wa_l { nx = wa_l; }
+        (nx, ny)
     }
 
     /// True when the controls bar should be drawn. Hidden in fullscreen or
@@ -2823,6 +2919,27 @@ impl MpvNe {
             let h = (w as f32 / va).round() as u32;
             (w.max(1), h.max(1))
         }
+    }
+
+    /// Navigate the file browser to `target` (None = drives list), pushing
+    /// the current location onto the back stack first so BrowserBack can
+    /// return to it. The single entry point every browser navigation
+    /// (Navigate, NavigateUp, GoToDrives, Open) goes through, so history
+    /// stays consistent no matter which one triggered the move.
+    fn browser_go(&mut self, target: Option<std::path::PathBuf>) {
+        if target == self.browser_path {
+            return; // no-op navigation - don't pollute history with it
+        }
+        self.browser_back_stack.push(self.browser_path.clone());
+        const MAX_BACK_STACK: usize = 50;
+        if self.browser_back_stack.len() > MAX_BACK_STACK {
+            self.browser_back_stack.remove(0);
+        }
+        self.browser_entries = match &target {
+            Some(p) => browser_read_dir(p),
+            None => browser_drives(),
+        };
+        self.browser_path = target;
     }
 
     /// Toggle, switch, or close the docked side panel. Returns a resize Task
@@ -3012,14 +3129,15 @@ impl MpvNe {
     }
 
     pub fn title_str(&self) -> String {
+        let prefix = if self.private_mode { "[Private] " } else { "" };
         if let Some(path) = &self.player.path {
             let name = std::path::Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(path.as_str());
-            format!("MPV-NE | {}", name)
+            format!("{prefix}MPV-NE | {}", name)
         } else {
-            "MPV-NE".to_string()
+            format!("{prefix}MPV-NE")
         }
     }
 

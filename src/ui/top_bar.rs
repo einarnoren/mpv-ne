@@ -139,6 +139,20 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center);
 
+    if app.private_mode {
+        let badge = container(text("PRIVATE").size(11).color(Color::WHITE))
+            .padding([3, 8])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.820, 0.290, 0.290))),
+                border: Border {
+                    radius: iced::border::Radius::new(4.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        buttons = buttons.push(badge);
+    }
+
     if USE_CUSTOM_TITLE_BAR {
         let min_btn = icons::tipped(
             icons::square_btn(icons::window_minimize()).on_press(Message::MinimizeWindow),

@@ -52,15 +52,16 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .on_press(msg)
     };
 
-    let location_bar = container(
-        row![
-            nav_btn("..", Message::BrowserNavigateUp),
-            nav_btn("PC", Message::BrowserGoToDrives),
-            text(display_loc).size(11).color(TEXT_MUTED),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
+    let mut nav_row = iced::widget::Row::new().spacing(6).align_y(Alignment::Center);
+    if !app.browser_back_stack.is_empty() {
+        nav_row = nav_row.push(nav_btn("<", Message::BrowserBack));
+    }
+    nav_row = nav_row
+        .push(nav_btn("..", Message::BrowserNavigateUp))
+        .push(nav_btn("PC", Message::BrowserGoToDrives))
+        .push(text(display_loc).size(11).color(TEXT_MUTED));
+
+    let location_bar = container(nav_row)
     .padding([7, 10])
     .width(Length::Fill)
     .style(|_| container::Style {

@@ -26,6 +26,12 @@ pub struct ResumeDb {
     #[serde(default)] sub_tracks:   HashMap<String, i64>,
     #[serde(default)] volumes:      HashMap<String, f64>,
     #[serde(default)] bookmarks:    HashMap<String, Vec<Bookmark>>,
+    /// When true, `save()` is a no-op - private/no-trace mode. Not
+    /// persisted itself (that would defeat the point); set fresh each
+    /// session via `set_private`. In-memory reads/writes still work
+    /// normally within the session, only the on-disk file is untouched.
+    #[serde(skip)]
+    private: bool,
 }
 
 impl ResumeDb {
@@ -35,7 +41,12 @@ impl ResumeDb {
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
+    pub fn set_private(&mut self, private: bool) {
+        self.private = private;
+    }
+
     pub fn save(&self) {
+        if self.private { return; }
         let Some(path) = db_path() else { return };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -184,6 +195,9 @@ const MAX_RECENT: usize = 30;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RecentFiles {
     pub paths: Vec<PathBuf>,
+    /// See `ResumeDb::private` - same private/no-trace mechanism.
+    #[serde(skip)]
+    private: bool,
 }
 
 impl RecentFiles {
@@ -193,7 +207,12 @@ impl RecentFiles {
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
+    pub fn set_private(&mut self, private: bool) {
+        self.private = private;
+    }
+
     pub fn save(&self) {
+        if self.private { return; }
         let Some(p) = recent_path() else { return };
         if let Some(parent) = p.parent() {
             let _ = std::fs::create_dir_all(parent);

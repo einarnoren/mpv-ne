@@ -139,6 +139,128 @@ fn ctx_menu_divider<'a>() -> Element<'a, Message> {
         .into()
 }
 
+/// Styled collapsible-section header row: label + expand/collapse arrow.
+/// Dispatches `Message::ToggleMenuSection` directly (NOT wrapped in
+/// `VideoMenuAction`) so clicking it toggles the section without closing
+/// the popup.
+fn ctx_menu_header<'a>(label: &'static str, idx: usize, open: bool) -> Element<'a, Message> {
+    let arrow = if open { "\u{25BE}" } else { "\u{25B8}" }; // ▾ / ▸
+    button(
+        row![
+            text(label).size(12).color(TEXT_MUTED),
+            Space::new().width(Length::Fill),
+            text(arrow).size(11).color(TEXT_MUTED),
+        ]
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([7, 14])
+    .width(Length::Fill)
+    .style(|_, status| {
+        use iced::widget::button::Status;
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(
+                if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_SURFACE }
+            )),
+            ..Default::default()
+        }
+    })
+    .on_press(Message::ToggleMenuSection(idx))
+    .into()
+}
+
+/// One row of the main-menu popup, kept as data so the row list can be
+/// built once and shared between rendering and height estimation (see
+/// `menu_window_height` in app.rs) - keeps them from drifting out of sync.
+enum MenuRow {
+    Item(&'static str, Message),
+    Divider,
+    /// Collapsible section header. `idx` indexes `MpvNe::menu_section_open`.
+    Header(&'static str, usize),
+}
+
+/// Build the row list for the main-menu popup. Shared by `menu_window_view`
+/// (rendering) and `menu_window_height` (size estimation) so they can never
+/// disagree about what's visible.
+fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
+    use MenuRow::*;
+    let has_media = app.player.path.is_some();
+    let mut rows = Vec::new();
+
+    rows.push(Item("Open file(s)…", Message::VideoMenuAction(Box::new(Message::OpenFile))));
+    rows.push(Item("Open URL / stream…", Message::VideoMenuAction(Box::new(Message::OpenUrl))));
+    rows.push(Item("Playlist", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
+    rows.push(Item("Browse files", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
+    rows.push(Item("Recent", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
+    let private_label = if app.private_mode { "Exit private mode" } else { "Private mode (no history)" };
+    rows.push(Item(private_label, Message::VideoMenuAction(Box::new(Message::TogglePrivateMode))));
+    if has_media {
+        rows.push(Item("Stop", Message::VideoMenuAction(Box::new(Message::Stop))));
+    }
+    rows.push(Divider);
+
+    if has_media {
+        rows.push(Header("Playback", 0));
+        if app.menu_section_open[0] {
+            let play_label = if app.player.paused { "Play" } else { "Pause" };
+            rows.push(Item(play_label, Message::VideoMenuAction(Box::new(Message::TogglePause))));
+            rows.push(Item("Previous file", Message::VideoMenuAction(Box::new(Message::PrevFile))));
+            rows.push(Item("Next file", Message::VideoMenuAction(Box::new(Message::NextFile))));
+            rows.push(Item("Back 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(-10.0)))));
+            rows.push(Item("Forward 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(10.0)))));
+            rows.push(Item("Set A-B loop point A", Message::VideoMenuAction(Box::new(Message::AbLoopSetA))));
+            rows.push(Item("Set A-B loop point B", Message::VideoMenuAction(Box::new(Message::AbLoopSetB))));
+            rows.push(Item("Clear A-B loop", Message::VideoMenuAction(Box::new(Message::AbLoopClear))));
+        }
+
+        rows.push(Header("Video & Audio", 1));
+        if app.menu_section_open[1] {
+            rows.push(Item("Cycle fit / fill / stretch", Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
+            rows.push(Item("Take screenshot", Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
+            rows.push(Item("Cycle audio track", Message::VideoMenuAction(Box::new(Message::CycleAudio))));
+            let mute_label = if app.player.muted { "Unmute" } else { "Mute" };
+            rows.push(Item(mute_label, Message::VideoMenuAction(Box::new(Message::ToggleMute))));
+            rows.push(Item("Cycle subtitle track", Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
+        }
+        rows.push(Divider);
+    }
+
+    let fs_label = if app.fullscreen { "Exit fullscreen" } else { "Fullscreen" };
+    rows.push(Item(fs_label, Message::VideoMenuAction(Box::new(Message::ToggleFullscreen))));
+    let focus_label = if app.chrome_force_hidden { "Exit focus mode" } else { "Focus mode" };
+    rows.push(Item(focus_label, Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
+    let pin_label = if app.pinned { "Unpin (always on top)" } else { "Always on top" };
+    rows.push(Item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
+    let pip_label = if app.pip_active { "Exit Picture-in-Picture" } else { "Picture-in-Picture" };
+    rows.push(Item(pip_label, Message::VideoMenuAction(Box::new(Message::TogglePip))));
+    rows.push(Item("Settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
+    rows.push(Item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
+    rows.push(Divider);
+
+    rows.push(Item("Keyboard shortcuts", Message::VideoMenuAction(Box::new(Message::ShowHelp))));
+    rows.push(Item("Exit", Message::VideoMenuAction(Box::new(Message::CloseWindow))));
+
+    rows
+}
+
+/// Estimated pixel height of the main-menu popup for the current row list -
+/// items/headers ~30px, dividers 1px, 1px column spacing between every row,
+/// 2px border. Used by `open_main_menu` / `ToggleMenuSection` in app.rs to
+/// size the popup OS window (iced can't report actual rendered height from
+/// outside the render pass).
+pub fn menu_window_height(app: &MpvNe) -> f32 {
+    let rows = menu_rows(app);
+    let n = rows.len();
+    let mut h: f32 = 2.0; // border
+    if n > 1 { h += (n - 1) as f32; } // 1px column spacing between rows
+    for row in &rows {
+        h += match row {
+            MenuRow::Divider => 1.0,
+            MenuRow::Item(..) | MenuRow::Header(..) => 30.0,
+        };
+    }
+    h
+}
+
 /// Content of the floating main-menu popup window: sectioned like a classic
 /// player menu (File / Playback / Video / Audio / Subtitles / Window / App).
 /// Reachable both by right-clicking the video and via the hamburger button
@@ -151,58 +273,14 @@ fn ctx_menu_divider<'a>() -> Element<'a, Message> {
 /// closes via a menu action, Escape, or losing OS focus.
 pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
     use iced::widget::Column;
-    let has_media = app.player.path.is_some();
-    let mut items: Vec<Element<'_, Message>> = Vec::new();
-
-    items.push(ctx_menu_item("Open file(s)…", Message::VideoMenuAction(Box::new(Message::OpenFile))));
-    items.push(ctx_menu_item("Open URL / stream…", Message::VideoMenuAction(Box::new(Message::OpenUrl))));
-    items.push(ctx_menu_item("Playlist", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
-    items.push(ctx_menu_item("Browse files", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
-    items.push(ctx_menu_item("Recent", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
-    if has_media {
-        items.push(ctx_menu_item("Stop", Message::VideoMenuAction(Box::new(Message::Stop))));
-    }
-    items.push(ctx_menu_divider());
-
-    if has_media {
-        let play_label = if app.player.paused { "Play" } else { "Pause" };
-        items.push(ctx_menu_item(play_label, Message::VideoMenuAction(Box::new(Message::TogglePause))));
-        items.push(ctx_menu_item("Previous file", Message::VideoMenuAction(Box::new(Message::PrevFile))));
-        items.push(ctx_menu_item("Next file", Message::VideoMenuAction(Box::new(Message::NextFile))));
-        items.push(ctx_menu_item("Back 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(-10.0)))));
-        items.push(ctx_menu_item("Forward 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(10.0)))));
-        items.push(ctx_menu_item("Set A-B loop point A", Message::VideoMenuAction(Box::new(Message::AbLoopSetA))));
-        items.push(ctx_menu_item("Set A-B loop point B", Message::VideoMenuAction(Box::new(Message::AbLoopSetB))));
-        items.push(ctx_menu_item("Clear A-B loop", Message::VideoMenuAction(Box::new(Message::AbLoopClear))));
-        items.push(ctx_menu_divider());
-
-        items.push(ctx_menu_item("Cycle fit / fill / stretch", Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
-        items.push(ctx_menu_item("Take screenshot", Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
-        items.push(ctx_menu_divider());
-
-        items.push(ctx_menu_item("Cycle audio track", Message::VideoMenuAction(Box::new(Message::CycleAudio))));
-        let mute_label = if app.player.muted { "Unmute" } else { "Mute" };
-        items.push(ctx_menu_item(mute_label, Message::VideoMenuAction(Box::new(Message::ToggleMute))));
-        items.push(ctx_menu_divider());
-
-        items.push(ctx_menu_item("Cycle subtitle track", Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
-        items.push(ctx_menu_divider());
-    }
-
-    let fs_label = if app.fullscreen { "Exit fullscreen" } else { "Fullscreen" };
-    items.push(ctx_menu_item(fs_label, Message::VideoMenuAction(Box::new(Message::ToggleFullscreen))));
-    let focus_label = if app.chrome_force_hidden { "Exit focus mode" } else { "Focus mode" };
-    items.push(ctx_menu_item(focus_label, Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
-    let pin_label = if app.pinned { "Unpin (always on top)" } else { "Always on top" };
-    items.push(ctx_menu_item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
-    let pip_label = if app.pip_active { "Exit Picture-in-Picture" } else { "Picture-in-Picture" };
-    items.push(ctx_menu_item(pip_label, Message::VideoMenuAction(Box::new(Message::TogglePip))));
-    items.push(ctx_menu_item("Settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
-    items.push(ctx_menu_item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
-    items.push(ctx_menu_divider());
-
-    items.push(ctx_menu_item("Keyboard shortcuts", Message::VideoMenuAction(Box::new(Message::ShowHelp))));
-    items.push(ctx_menu_item("Exit", Message::VideoMenuAction(Box::new(Message::CloseWindow))));
+    let items: Vec<Element<'_, Message>> = menu_rows(app)
+        .into_iter()
+        .map(|row| match row {
+            MenuRow::Item(label, msg) => ctx_menu_item(label, msg),
+            MenuRow::Divider => ctx_menu_divider(),
+            MenuRow::Header(label, idx) => ctx_menu_header(label, idx, app.menu_section_open[idx]),
+        })
+        .collect();
 
     container(
         Column::with_children(items).spacing(1).width(Length::Fill),
