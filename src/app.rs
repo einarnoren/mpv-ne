@@ -358,6 +358,11 @@ pub struct MpvNe {
     /// different drive and wanting to return to where you just were isn't
     /// "up" from anywhere).
     pub browser_back_stack: Vec<Option<std::path::PathBuf>>,
+    /// Locations undone by Back, most-recent-last - popped by the Forward
+    /// button. Cleared on any fresh navigation (one that didn't come from
+    /// Back/Forward itself), same as a normal desktop file browser: going
+    /// somewhere new invalidates whatever you'd have gone "forward" to.
+    pub browser_forward_stack: Vec<Option<std::path::PathBuf>>,
     /// Resume position database (loaded once at startup).
     pub resume_db: ResumeDb,
     /// Recently opened files (most-recent-first).
@@ -496,6 +501,7 @@ impl Default for MpvNe {
             browser_path: None,
             browser_entries: Vec::new(),
             browser_back_stack: Vec::new(),
+            browser_forward_stack: Vec::new(),
             resume_db: ResumeDb::load(),
             recent_files: RecentFiles::load(),
             ab_loop_a: None,
@@ -605,6 +611,7 @@ pub enum Message {
     BrowserNavigateUp,
     BrowserGoToDrives,
     BrowserBack,
+    BrowserForward,
     BrowserOpen(std::path::PathBuf),
     // Playlist
     PlaylistJump(usize),
@@ -1587,6 +1594,17 @@ impl MpvNe {
             }
             Message::BrowserBack => {
                 if let Some(target) = self.browser_back_stack.pop() {
+                    self.browser_forward_stack.push(self.browser_path.clone());
+                    self.browser_path = target;
+                    self.browser_entries = match &self.browser_path {
+                        Some(p) => browser_read_dir(p),
+                        None => browser_drives(),
+                    };
+                }
+            }
+            Message::BrowserForward => {
+                if let Some(target) = self.browser_forward_stack.pop() {
+                    self.browser_back_stack.push(self.browser_path.clone());
                     self.browser_path = target;
                     self.browser_entries = match &self.browser_path {
                         Some(p) => browser_read_dir(p),
@@ -2935,6 +2953,9 @@ impl MpvNe {
         if self.browser_back_stack.len() > MAX_BACK_STACK {
             self.browser_back_stack.remove(0);
         }
+        // A fresh navigation (not Back/Forward itself) invalidates whatever
+        // was available to go forward to - same as a normal desktop browser.
+        self.browser_forward_stack.clear();
         self.browser_entries = match &target {
             Some(p) => browser_read_dir(p),
             None => browser_drives(),

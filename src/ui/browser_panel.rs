@@ -19,6 +19,14 @@ fn trunc(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Small icon button for the location bar (Back/Forward/Up/This PC) - reuses
+/// the app's standard square icon-button sizing so it doesn't look cramped
+/// next to the icon's own padding.
+fn nav_btn<'a>(icon: iced::widget::Svg<'a>, msg: Message, tip: &'static str) -> Element<'a, Message> {
+    let btn = super::icons::square_btn(icon).on_press(msg);
+    super::icons::tipped(btn, tip)
+}
+
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // ── Location bar ─────────────────────────────────────────────────────────
     let location_text = match &app.browser_path {
@@ -31,34 +39,16 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         location_text.clone()
     };
 
-    let nav_btn = |label: &'static str, msg: Message| {
-        button(text(label).size(12).color(TEXT_MUTED))
-            .padding([3, 8])
-            .style(|_, status| {
-                use iced::widget::button::Status;
-                let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_SURFACE,
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: iced::border::Radius::new(3.0),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }
-            })
-            .on_press(msg)
-    };
-
     let mut nav_row = iced::widget::Row::new().spacing(6).align_y(Alignment::Center);
     if !app.browser_back_stack.is_empty() {
-        nav_row = nav_row.push(nav_btn("<", Message::BrowserBack));
+        nav_row = nav_row.push(nav_btn(super::icons::nav_back(), Message::BrowserBack, "Back"));
+    }
+    if !app.browser_forward_stack.is_empty() {
+        nav_row = nav_row.push(nav_btn(super::icons::nav_forward(), Message::BrowserForward, "Forward"));
     }
     nav_row = nav_row
-        .push(nav_btn("..", Message::BrowserNavigateUp))
-        .push(nav_btn("PC", Message::BrowserGoToDrives))
+        .push(nav_btn(super::icons::nav_up(), Message::BrowserNavigateUp, "Up to parent folder"))
+        .push(nav_btn(super::icons::nav_pc(), Message::BrowserGoToDrives, "This PC (drive list)"))
         .push(text(display_loc).size(11).color(TEXT_MUTED));
 
     let location_bar = container(nav_row)

@@ -273,6 +273,42 @@ pub fn pip<'a>() -> Svg<'a> {
         .height(Length::Fixed(ICON_SIZE as f32))
 }
 
+/// Left chevron - browser back navigation.
+pub fn nav_back<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Right chevron - browser forward navigation.
+pub fn nav_forward<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Up chevron - go to the parent folder.
+pub fn nav_up<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 15 12 8 19 15"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Monitor/desktop outline - "This PC" drive list.
+pub fn nav_pc<'a>() -> Svg<'a> {
+    let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><line x1="8" y1="20" x2="16" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></g>"##;
+    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
 /// Three horizontal lines - main application menu button.
 pub fn hamburger<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></g>"##;
