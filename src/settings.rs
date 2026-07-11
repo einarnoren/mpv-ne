@@ -43,10 +43,15 @@ pub struct Settings {
     /// instant, but can land up to a few seconds off.
     #[serde(default = "default_true")]
     pub precise_seek: bool,
+    /// Max height (in pixels) yt-dlp is allowed to grab for network streams
+    /// (YouTube/Twitch/etc). 0 = uncapped. See `Player::set_stream_quality`.
+    #[serde(default = "default_stream_quality")]
+    pub stream_quality_height: u32,
 }
 
 fn default_true() -> bool { true }
 fn default_volume() -> f64 { 100.0 }
+fn default_stream_quality() -> u32 { 1080 }
 
 impl Settings {
     pub fn load() -> Self {

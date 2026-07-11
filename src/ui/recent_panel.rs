@@ -28,17 +28,26 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         let is_current_path = app.player.path.clone();
 
         let rows = app.recent_files.paths.iter().map(|path| {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned());
-            let display_name = trunc(&name, 32);
+            let path_str = path.to_string_lossy();
+            let is_url = path_str.starts_with("http://") || path_str.starts_with("https://");
 
-            let dir = path
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let dir_display = trunc(&dir, 30);
+            // A URL's "file_name"/"parent" split (lexical, path-shaped) reads
+            // as garbled nonsense - e.g. "watch?v=xyz" / "https://www.
+            // youtube.com" - so show the whole URL as the name instead and
+            // skip the second line rather than a confusing split.
+            let (display_name, dir_display) = if is_url {
+                (trunc(&path_str, 40), String::new())
+            } else {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone().into_owned());
+                let dir = path
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (trunc(&name, 32), trunc(&dir, 30))
+            };
 
             let is_current = is_current_path.as_deref() == Some(&path.to_string_lossy().into_owned());
             let name_color = if is_current { AURORA_TEAL } else { TEXT_BRIGHT };

@@ -313,6 +313,9 @@ pub struct MpvNe {
     /// Whether seeking lands on the exact frame ("precise") or the nearest
     /// keyframe (faster, less exact). See `Settings::precise_seek`.
     pub precise_seek: bool,
+    /// Max height yt-dlp is allowed to grab for network streams. 0 = uncapped.
+    /// See `Settings::stream_quality_height`/`Player::set_stream_quality`.
+    pub stream_quality_height: u32,
     pub screenshot_dir: String,
     /// URL waiting on `download_ytdlp` to finish before it can be opened -
     /// set when a URL needs yt-dlp and it isn't available yet - see
@@ -405,6 +408,13 @@ pub struct MpvNe {
     pub ab_loop_b: Option<f64>,
     /// True while auto-chasing the live edge after End is pressed.
     pub live_catching_up: bool,
+    /// True once the current file has been confirmed as an actively
+    /// growing/live stream (its duration has genuinely increased under
+    /// `LiveEdgeTick`'s polling, not just a momentary EOF pause). Unlike
+    /// `live_catching_up`/`live_edge_paused`, which toggle on and off
+    /// through normal playback, this is a stable per-file "is this live"
+    /// signal for UI display - reset on the next `FileLoaded`.
+    pub stream_is_live: bool,
     /// The target of the most-recent seek issued during a live chase.
     /// Used to debounce: we skip a DurationChanged-triggered seek if the
     /// new target is within 10s of this value (avoids hundreds of seeks
@@ -509,6 +519,7 @@ impl Default for MpvNe {
             audio_lang: crate::settings::Settings::load().audio_lang,
             sub_lang: crate::settings::Settings::load().sub_lang,
             precise_seek: crate::settings::Settings::load().precise_seek,
+            stream_quality_height: crate::settings::Settings::load().stream_quality_height,
             screenshot_dir: crate::settings::Settings::load().screenshot_dir,
             pending_ytdl_url: None,
             suppress_volume_osd: false,
@@ -548,6 +559,7 @@ impl Default for MpvNe {
             ab_loop_a: None,
             ab_loop_b: None,
             live_catching_up: false,
+            stream_is_live: false,
             live_last_seek: 0.0,
             live_edge_paused: false,
             live_edge_ref_duration: 0.0,
@@ -565,6 +577,7 @@ impl Default for MpvNe {
         };
         app.player.set_audio_normalize(app.audio_normalize);
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
+        app.player.set_stream_quality(app.stream_quality_height);
         // If a previous session already auto-downloaded yt-dlp, use it
         // without waiting to discover that again on first URL open.
         if let Some(path) = ytdl_local_path() {
@@ -638,6 +651,7 @@ pub enum Message {
     AudioLangInput(String),
     SubLangInput(String),
     TogglePreciseSeek,
+    StreamQualitySet(u32),
     FitToVisible,
     FitToScale(f32),
     FitToHeight(u32),
@@ -1067,6 +1081,7 @@ impl MpvNe {
                             audio_lang: self.audio_lang.clone(),
                             sub_lang: self.sub_lang.clone(),
                             precise_seek: self.precise_seek,
+                            stream_quality_height: self.stream_quality_height,
                         }
                         .save();
                     }
@@ -1227,6 +1242,7 @@ impl MpvNe {
                 self.transitioning = false;
                 self.live_catching_up = false;
                 self.live_edge_paused = false;
+                self.stream_is_live = false;
                 self.size_est_duration = 0.0;
                 self.size_ref_size = 0;
                 self.size_ref_duration = 0.0;
@@ -1345,6 +1361,7 @@ impl MpvNe {
                     } else {
                         self.live_edge_stall_count = 0;
                         self.live_edge_ref_duration = self.player.duration;
+                        self.stream_is_live = true;
                     }
                     tracing::debug!(
                         pos = self.player.position,
@@ -1928,6 +1945,8 @@ impl MpvNe {
                                     ]);
                                 } else {
                                     self.player.open_url(&m.input);
+                                    self.recent_files.record(&std::path::PathBuf::from(&m.input));
+                                    self.recent_files.save();
                                     return Task::done(Message::ShowOsd(format!("Opening: {}", m.input)));
                                 }
                             }
@@ -2019,6 +2038,8 @@ impl MpvNe {
                         self.player.set_ytdl_path(&path);
                         if let Some(url) = self.pending_ytdl_url.take() {
                             self.player.open_url(&url);
+                            self.recent_files.record(&std::path::PathBuf::from(&url));
+                            self.recent_files.save();
                             return Task::done(Message::ShowOsd(format!("Opening: {url}")));
                         }
                     }
@@ -2683,6 +2704,13 @@ impl MpvNe {
                 self.precise_seek = !self.precise_seek;
                 let mut prefs = crate::settings::Settings::load();
                 prefs.precise_seek = self.precise_seek;
+                prefs.save();
+            }
+            Message::StreamQualitySet(height) => {
+                self.stream_quality_height = height;
+                self.player.set_stream_quality(height);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.stream_quality_height = height;
                 prefs.save();
             }
             Message::ToggleChrome => {

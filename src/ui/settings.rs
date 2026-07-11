@@ -39,6 +39,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             ),
         ].into()),
         gap(),
+        section_sub(
+            "Stream quality",
+            "Max resolution yt-dlp grabs for network streams (Open URL)",
+            stream_quality_row(app),
+        ),
+        gap(),
         // ── Audio ─────────────────────────────────────────────────
         category("Audio"),
         section("Track", audio_track_list(app)),
@@ -543,6 +549,47 @@ fn window_size_row(app: &MpvNe) -> Element<'_, Message> {
             btn("50%".into(), Message::FitToScale(0.5)),
             btn("150%".into(), Message::FitToScale(1.5)),
             btn("200%".into(), Message::FitToScale(2.0)),
+        ].spacing(4),
+    ]
+    .spacing(6)
+    .into()
+}
+
+fn stream_quality_row(app: &MpvNe) -> Element<'_, Message> {
+    let opt = |label: &'static str, height: u32| {
+        let active = app.stream_quality_height == height;
+        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
+        button(text(label).size(11).color(color))
+            .padding([4, 8])
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        width: if active { 1.0 } else { 0.0 },
+                        radius: iced::border::Radius::new(4.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::StreamQualitySet(height))
+    };
+
+    column![
+        row![
+            opt("480p", 480),
+            opt("720p", 720),
+            opt("1080p", 1080),
+        ].spacing(4),
+        row![
+            opt("1440p", 1440),
+            opt("4K", 2160),
+            opt("Best", 0),
         ].spacing(4),
     ]
     .spacing(6)

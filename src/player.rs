@@ -255,19 +255,15 @@ impl Player {
             set_opt_str(h, "demuxer-max-bytes", "500M");
             set_opt_str(h, "demuxer-readahead-secs", "3600");
 
-            // Cap yt-dlp's default format selection at 1080p and skip AV1.
-            // Left unrestricted, yt-dlp grabs the highest available quality
-            // - for YouTube that's often AV1 even well below 4K, which is
-            // brutal to decode without working hardware AV1 decode (common
-            // on GPUs/drivers older than a couple of years) and can take
-            // many seconds - or effectively forever - to produce a first
-            // frame in software, looking like video simply isn't working.
-            // VP9/H264 are far more broadly hardware-accelerated.
-            set_opt_str(
-                h,
-                "ytdl-format",
-                "bestvideo[vcodec!*=av01][height<=?1080]+bestaudio/best[height<=?1080]",
-            );
+            // Cap yt-dlp's default format selection (see `set_stream_quality`,
+            // called with the saved preference right after this returns) and
+            // skip AV1. Left unrestricted, yt-dlp grabs the highest available
+            // quality - for YouTube that's often AV1 even well below 4K,
+            // which is brutal to decode without working hardware AV1 decode
+            // (common on GPUs/drivers older than a couple of years) and can
+            // take many seconds - or effectively forever - to produce a
+            // first frame in software, looking like video simply isn't
+            // working. VP9/H264 are far more broadly hardware-accelerated.
 
             // Screenshot filenames: source filename (no extension) + playback
             // timestamp with milliseconds, e.g. "MyRecording_01-15-32.451.jpg",
@@ -559,6 +555,20 @@ impl Player {
         // setting it here assumes we're the only thing using it, which
         // holds since nothing else in this app touches script-opts.
         set_opt_str(self.handle.0, "script-opts", &format!("ytdl_hook-ytdl_path={path}"));
+    }
+
+    /// Cap the quality yt-dlp grabs for network streams (YouTube/Twitch/
+    /// etc). `max_height` of 0 means uncapped ("best", whatever that is -
+    /// AV1 is still excluded, see `set_ytdl_path`'s neighbor comment).
+    pub fn set_stream_quality(&self, max_height: u32) {
+        let spec = if max_height == 0 {
+            "bestvideo[vcodec!*=av01]+bestaudio/best".to_string()
+        } else {
+            format!(
+                "bestvideo[vcodec!*=av01][height<=?{max_height}]+bestaudio/best[height<=?{max_height}]"
+            )
+        };
+        set_opt_str(self.handle.0, "ytdl-format", &spec);
     }
 
     pub fn set_rotate(&mut self, degrees: i64) {

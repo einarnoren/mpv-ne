@@ -219,6 +219,19 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .color(TEXT_BRIGHT)
     .size(13);
 
+    let live_badge: Element<'_, Message> = if app.stream_is_live {
+        container(text("LIVE").size(10).color(iced::Color::WHITE))
+            .padding([2, 6])
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgb(0.820, 0.290, 0.290))),
+                border: iced::Border { radius: iced::border::Radius::new(3.0), ..Default::default() },
+                ..Default::default()
+            })
+            .into()
+    } else {
+        Space::new().into()
+    };
+
 
     // Codec/audio info line: first thing to go as the window narrows.
     let info_text = build_info_line(app);
@@ -344,6 +357,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         }
         r = r.push(open_btn);
         r = r.push(time);
+        r = r.push(live_badge);
         r = r.push(info);
         r = r.push(Space::new().width(Length::Fill));
         if w >= 620.0 {
