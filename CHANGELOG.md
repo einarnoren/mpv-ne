@@ -6,6 +6,41 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.3.5] — 2026-07-12
+
+### Network Streaming
+- **Open URL / stream playback fixed end-to-end** — direct links, RTSP/HLS,
+  and YouTube/Twitch/etc. links via yt-dlp (fetched automatically the first
+  time it's needed). Fixed three stacked bugs: a dead message handler that
+  never fired, an unbounded stream quality default that could select
+  unplayable AV1 4K streams, and a missing internal state update that kept
+  the video view on the idle placeholder even while frames were decoding.
+- **Stream quality selector** (480p through 4K, or Best/uncapped), remembered
+  in Settings.
+- **LIVE badge** on the transport bar for streams confirmed to be growing.
+- Recently opened streams now show up in the Recent panel alongside files.
+- mpv's own internal log messages are now forwarded into the app's log
+  output, which made the above diagnosable in the first place.
+
+### Settings Panel
+- Reorganized into labeled categories (Playback, Audio, Subtitles, Video,
+  Playback control, Other); larger section headings; clarified "Audio sync"
+  vs "Subtitle sync" wording (previously easy to confuse).
+- Added controls that existed elsewhere in the app but were missing from
+  Settings: audio/subtitle track pickers, mute, subtitle visibility, frame
+  fit cycling, window size presets, audio normalizer, preferred
+  audio/subtitle language, and a precise-vs-fast seek toggle.
+
+### Side Panel
+- The docked Playlist/Browser/Recent/Settings panel can now be detached into
+  its own resizable window, matching the main window's chrome. Its position
+  and size are remembered between detach/reattach.
+- File browser gained Explorer-style Back/Forward navigation.
+
+### Other
+- Fixed icon contrast on activated toggle buttons.
+- Main menu no longer overlaps or renders off-screen on smaller displays.
+
 ## [0.3.0] — 2026-07-08
 
 ### Main Menu
