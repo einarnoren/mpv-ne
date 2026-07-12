@@ -13,15 +13,20 @@ inspired by [PotPlayer](https://potplayer.tv/).
 - Hardware-accelerated video via libmpv (H.264, H.265/HEVC, AV1, VP9, …)
 - Custom dark UI - no OS chrome required
 - **Focus mode** - hide all chrome with `H`, leaving only the video. Controls and top bar fade in on hover
-- Seekbar thumbnail preview (generated in background, no ffmpeg required)
+- **Picture-in-picture mode** - shrink to a small always-on-top corner window
+- Seekbar thumbnail scrub preview (generated in background, no ffmpeg required)
 - **Live/growing file support** - designed for active recordings still being written to disk; `End` key jumps to the live edge with automatic catch-up, and playback resumes automatically as new content is buffered. Works with any format mpv can stream (MKV, TS, fragmented MP4, …)
-- Playlist with sort, shuffle, save/load (.m3u)
-- File browser & recent files panels
+- **Network streams** - paste a URL (direct link, RTSP/HLS, or a YouTube/Twitch/etc. link) via Open URL; yt-dlp is fetched automatically the first time it's needed
+- Playlist with sort, shuffle, save/load (.m3u); file browser (with back/forward history) & recent files panels, including recently opened streams
+- Right-click context menu on the video, with a matching floating main menu
 - Video equaliser (brightness, contrast, saturation, hue, gamma)
+- Audio normalizer, per-file remembered volume/audio-track/subtitle-track
 - Subtitle search via OpenSubtitles.com
-- A-B loop, chapter navigation
-- Snap-to-screen-edge window behaviour
+- A-B loop, chapter navigation, named bookmarks
+- Stats overlay (bitrate, fps, dropped frames, buffer)
+- Snap-to-screen-edge window behaviour; remembered window position, validated against connected monitors
 - Resume playback from last position
+- Private/no-trace mode - suppresses all of the above history for the session
 - And more - see the Settings panel
 
 ---
@@ -103,30 +108,22 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 
 ## Roadmap
 
-- Rebuilt settings panel with full customisability (choose what appears, reorder sections)
-- Right-click context menu on video
+- Settings panel full customisability (choose what appears, reorder sections)
 - Colour themes based on Nordic seasons
 - Visual effects and animations
 - Customisable button layout
-- Mini player mode
-- Picture-in-picture mode
-- Audio spectrum visualizer
-- Bookmark system (named timestamps)
-- Stats overlay (bitrate, fps, dropped frames, buffer)
-- Audio normalizer
-- Audio pitch correction with speed change
+- Mini player mode + audio spectrum visualizer (built, not yet merged)
 - Pan and scan with mouse drag
-- Zoom to fit / fill toggle
-- Scrub preview (drag seekbar before releasing)
 - Jump to next / previous subtitle
 - Secondary subtitle track
-- Remember per-file settings (volume, subtitle, audio track)
 - Speed step customisation
-- Network streams (RTSP, HLS, yt-dlp)
-- Richer playlist formats
+- Richer playlist formats (import .pls/.m3u/etc., not just export)
 - File associations (register as default player)
-- Remember window position per monitor
-- Linux and macOS support
+- Frame-by-frame stepping
+- Configurable seek step size
+- In-app keyboard shortcut remapping
+- Minimize to system tray
+- Linux and macOS support (untested)
 
 ## Version
 
