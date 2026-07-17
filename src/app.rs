@@ -25,6 +25,9 @@ pub struct ModalDialog {
 pub enum ModalKind {
     JumpToTime,
     OpenUrl,
+    /// Add a URL/stream to the playlist without opening it immediately -
+    /// see `Message::ModalConfirm`'s arm for this kind.
+    AddPlaylistUrl,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +38,7 @@ pub struct FileContextMenu {
     pub y: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AfterPlayback {
     #[default]
     DoNothing,
@@ -59,6 +62,21 @@ pub enum PanelKind {
     Browser,
     Recent,
     Settings,
+}
+
+/// Left-nav categories in the standalone App Settings window (kept separate
+/// from the docked side panel's Settings tab, which stays playback-only -
+/// see `AppSettingsCategory`'s use in `ui::app_settings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AppSettingsCategory {
+    Interface,
+    Keyboard,
+}
+
+impl Default for AppSettingsCategory {
+    fn default() -> Self {
+        Self::Interface
+    }
 }
 
 /// One entry in the directory browser panel.
@@ -103,7 +121,7 @@ pub enum Action {
 
 /// How the video frame is fitted into the window. Cycled with the Z key and
 /// applied by the letterbox shader (mpv renders at native size).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FrameMode {
     /// Whole frame visible, black bars on the limiting axis.
     #[default]
@@ -131,6 +149,36 @@ impl FrameMode {
     }
 }
 
+/// The fixed list of rebindable key actions: (stable slot id - used as the
+/// persistence key and never shown to the user, display label, default key
+/// name, action). `Bindings::keys` is built from this plus any user
+/// overrides rather than hardcoded per-key like before, so a rebind is just
+/// "look up this slot's key instead of its default" - see `from_overrides`.
+/// Escape is NOT here - it exits fullscreen/chrome-hidden only, never enters
+/// fullscreen, and is handled directly in the `InputKey` handler instead.
+pub const KEY_SLOTS: &[(&str, &str, &str, Action)] = &[
+    ("toggle_pause", "Play / pause", "space", Action::TogglePause),
+    ("seek_back", "Seek back 5s", "left", Action::SeekRelative(-5.0)),
+    ("seek_fwd", "Seek forward 5s", "right", Action::SeekRelative(5.0)),
+    ("volume_up", "Volume up", "up", Action::VolumeAdjust(5.0)),
+    ("volume_down", "Volume down", "down", Action::VolumeAdjust(-5.0)),
+    ("prev_file", "Previous file", "pageup", Action::PrevFile),
+    ("next_file", "Next file", "pagedown", Action::NextFile),
+    ("toggle_mute", "Mute", "m", Action::ToggleMute),
+    ("toggle_fullscreen", "Fullscreen", "f", Action::ToggleFullscreen),
+    ("toggle_chrome", "Focus mode", "h", Action::ToggleChrome),
+    ("cycle_subtitle", "Cycle subtitle track", "j", Action::CycleSubtitle),
+    ("cycle_audio", "Cycle audio track", "#", Action::CycleAudio),
+    ("speed_down", "Speed down", "[", Action::SpeedAdjust(-0.1)),
+    ("speed_up", "Speed up", "]", Action::SpeedAdjust(0.1)),
+    ("speed_reset", "Reset speed", "\\", Action::SpeedReset),
+    ("toggle_sub_visibility", "Toggle subtitles", "v", Action::ToggleSubVisibility),
+    ("toggle_hwdec", "Toggle hardware decode", "i", Action::ToggleHwDec),
+    ("add_bookmark", "Add bookmark", "b", Action::AddBookmark),
+    ("toggle_stats", "Stats overlay", "s", Action::ToggleStats),
+    ("cycle_frame_mode", "Cycle frame fit", "z", Action::CycleFrameMode),
+];
+
 /// Maps every input trigger to an optional Action. `None` means the input is
 /// unbound - for example, single-left-click defaults to `None` so clicking the
 /// video doesn't toggle pause unless the user opts in.
@@ -147,32 +195,23 @@ pub struct Bindings {
     pub drag_window_anywhere: bool,
 }
 
-impl Default for Bindings {
-    fn default() -> Self {
+impl Bindings {
+    /// Build the key map from `KEY_SLOTS`, applying user overrides
+    /// (slot id -> key name, keyed by `Settings.keybindings`). An override
+    /// value of `""` means the slot was explicitly cleared (no key bound at
+    /// all, not even the default) - see `MpvNe::apply_key_rebind`.
+    pub fn from_overrides(overrides: &HashMap<String, String>) -> Self {
         let mut keys = HashMap::new();
-        keys.insert("space".into(), Action::TogglePause);
-        keys.insert("left".into(), Action::SeekRelative(-5.0));
-        keys.insert("right".into(), Action::SeekRelative(5.0));
-        keys.insert("up".into(), Action::VolumeAdjust(5.0));
-        keys.insert("down".into(), Action::VolumeAdjust(-5.0));
-        keys.insert("pageup".into(), Action::PrevFile);
-        keys.insert("pagedown".into(), Action::NextFile);
-        // Escape is NOT bound here - it exits fullscreen/chrome-hidden only,
-        // never enters fullscreen. Handled directly in InputKey below.
-        keys.insert("m".into(), Action::ToggleMute);
-        keys.insert("f".into(), Action::ToggleFullscreen);
-        keys.insert("h".into(), Action::ToggleChrome);
-        keys.insert("j".into(), Action::CycleSubtitle);
-        keys.insert("#".into(), Action::CycleAudio);
-        keys.insert("[".into(), Action::SpeedAdjust(-0.1));
-        keys.insert("]".into(), Action::SpeedAdjust(0.1));
-        keys.insert("\\".into(), Action::SpeedReset);
-        keys.insert("v".into(), Action::ToggleSubVisibility);
-        keys.insert("i".into(), Action::ToggleHwDec);
-        keys.insert("b".into(), Action::AddBookmark);
-        keys.insert("s".into(), Action::ToggleStats);
-        keys.insert("z".into(), Action::CycleFrameMode);
-
+        for (slot_id, _label, default_key, action) in KEY_SLOTS {
+            let key: Option<&str> = match overrides.get(*slot_id) {
+                Some(k) if k.is_empty() => None,
+                Some(k) => Some(k.as_str()),
+                None => Some(*default_key),
+            };
+            if let Some(key) = key {
+                keys.insert(key.to_string(), *action);
+            }
+        }
         Self {
             keys,
             single_left_click: None,
@@ -184,9 +223,25 @@ impl Default for Bindings {
     }
 }
 
+impl Default for Bindings {
+    fn default() -> Self {
+        Self::from_overrides(&HashMap::new())
+    }
+}
+
 /// Convert an Action into its equivalent Message so the existing handlers can
 /// execute it. Lets us keep the binding lookup path simple while reusing the
 /// existing implementations.
+/// App icon for secondary OS windows (detached panel, App Settings) - without
+/// this, Windows falls back to a generic icon in the taskbar/alt-tab instead
+/// of the app's own icon. The main window sets this via `boot()`.
+fn app_icon() -> Option<iced::window::Icon> {
+    iced::window::icon::from_file_data(
+        include_bytes!("../assets/MPV_NE_icon_hires.png"),
+        None,
+    ).ok()
+}
+
 fn action_to_message(a: Action) -> Message {
     match a {
         Action::TogglePause => Message::TogglePause,
@@ -221,11 +276,23 @@ const TOP_BAR_H: i32 = 44;
 /// Width of the docked side panel in logical pixels. Must match SETTINGS_PANEL_W in ui/mod.rs.
 const PANEL_W: f32 = 280.0;
 
-/// Set true to disable the OS title bar and draw our own - gives us pin,
-/// minimize, maximize, close all on the Nord top bar. Flip to false to fall
-/// back to the OS title bar (the bar will still show, just without the
-/// min/max/close buttons since the OS provides those).
-pub const USE_CUSTOM_TITLE_BAR: bool = true;
+/// Whether to disable the OS title bar and draw our own - gives us pin,
+/// minimize, maximize, close all on the Nord top bar. When off, falls back
+/// to the OS title bar (still shown, just without our min/max/close buttons
+/// since the OS provides those). Backed by an atomic rather than a plain
+/// bool field because window decorations are read from many places
+/// (including free functions with no `&MpvNe`); set once from Settings at
+/// startup - toggling it takes a restart, since decorations are fixed at
+/// window-creation time.
+static CUSTOM_TITLE_BAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn use_custom_title_bar() -> bool {
+    CUSTOM_TITLE_BAR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_custom_title_bar(on: bool) {
+    CUSTOM_TITLE_BAR.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[derive(Debug)]
 pub struct MpvNe {
@@ -246,6 +313,16 @@ pub struct MpvNe {
     pub playlist: Vec<std::path::PathBuf>,
     pub playlist_idx: usize,
     pub bindings: Bindings,
+    /// Key-rebind overrides (slot id -> key name), the source of truth
+    /// `bindings.keys` is rebuilt from via `Bindings::from_overrides` on
+    /// every rebind - see `apply_key_rebind`. Kept separate from `bindings`
+    /// itself since `Bindings` only stores the resolved key->Action map, not
+    /// which slot each key came from.
+    pub keybinding_overrides: HashMap<String, String>,
+    /// Slot id awaiting its next key press to bind, or `None` when not
+    /// actively capturing. Set by the Keyboard settings page's "Rebind"
+    /// button; consumed by the next `InputKey` event.
+    pub rebind_capture: Option<&'static str>,
     last_left_press: Option<Instant>,
     /// Manual override - true means hide controls even when not fullscreen.
     /// Effective visibility is `chrome_visible()`; controls are hidden when
@@ -317,6 +394,46 @@ pub struct MpvNe {
     /// See `Settings::stream_quality_height`/`Player::set_stream_quality`.
     pub stream_quality_height: u32,
     pub screenshot_dir: String,
+    /// Windows-only window-to-window/edge snapping while dragging. See
+    /// `win32_modal::set_snap_enabled`/`Settings::interface.snap_to_edge`.
+    pub snap_to_edge: bool,
+    /// Restore the last window position/size on launch. See boot().
+    pub remember_window: bool,
+    /// "Always start pinned" preference - distinct from the live `pinned`
+    /// field (which the Pin button toggles mid-session and shouldn't
+    /// overwrite this on every press).
+    pub start_pinned_pref: bool,
+    /// The saved custom-title-bar preference, for display in Settings.
+    /// Deliberately separate from the live `use_custom_title_bar()` flag
+    /// that windows are actually created with - changing this takes effect
+    /// on next launch only, so every window opened *this* session (main,
+    /// panel, App Settings) keeps using the same decoration mode instead of
+    /// windows opened before vs. after the toggle disagreeing with each other.
+    pub custom_title_bar_pref: bool,
+    /// Show OSD notification popups (volume/seek/speed/etc.).
+    pub osd_enabled: bool,
+    /// Generate and show the seekbar thumbnail scrub preview.
+    pub thumbnail_preview: bool,
+    /// Re-download the latest yt-dlp at every startup instead of only when missing.
+    pub auto_update_ytdlp: bool,
+    /// Windows-only: minimize the detached panel/App Settings windows along
+    /// with the main window. See `Message::MinimizeCheckTick`.
+    pub hide_all_on_minimize: bool,
+    pub pause_on_focus_lost: bool,
+    pub pause_on_minimize: bool,
+    /// Tracks whether the main window was minimized as of the last poll -
+    /// so hide/pause-on-minimize only fire on the transition, not every tick.
+    main_window_was_minimized: bool,
+    /// Queue sibling media files from the same folder into the playlist
+    /// when opening a file.
+    pub auto_load_siblings: bool,
+    /// Windows-only: whether opening a second file hands off to an
+    /// already-running instance instead of starting a new process. The
+    /// actual claim/hand-off happens in `main()` before this struct even
+    /// exists - this field is just for display/toggling in Settings, and
+    /// for the polling subscription that receives forwarded files (see
+    /// `Message::PollSingleInstance`).
+    pub single_instance: bool,
     /// URL waiting on `download_ytdlp` to finish before it can be opened -
     /// set when a URL needs yt-dlp and it isn't available yet - see
     /// `Message::ModalConfirm`'s `ModalKind::OpenUrl` arm and
@@ -334,6 +451,10 @@ pub struct MpvNe {
     file_info_osd_shown: bool,
     /// File size cache: populated once per path in a background task.
     pub size_cache: std::collections::HashMap<std::path::PathBuf, u64>,
+    /// Title/duration/uploader probed for playlist URL entries, keyed by
+    /// the URL string - see `fetch_url_metadata`. Not persisted; re-probed
+    /// each session (playlist URLs are re-fetched on add and on load).
+    pub playlist_url_meta: std::collections::HashMap<String, UrlMeta>,
     pub video_rotate: i64,   // 0 / 90 / 180 / 270
     pub video_hflip: bool,
     pub video_vflip: bool,
@@ -372,6 +493,14 @@ pub struct MpvNe {
     /// `panel_last_pos`, so re-detaching reopens it at the size you left it,
     /// not always back at the docked-panel default.
     panel_last_size: Option<(f32, f32)>,
+    /// The standalone App Settings window (Interface/Keyboard/...) - always
+    /// its own window, never dockable, unlike the side panel above. `None`
+    /// when closed.
+    pub app_settings_window_id: Option<iced::window::Id>,
+    app_settings_cursor_pos: Option<(f32, f32)>,
+    app_settings_last_pos: Option<(i32, i32)>,
+    app_settings_last_size: Option<(f32, f32)>,
+    pub app_settings_category: AppSettingsCategory,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -467,6 +596,8 @@ pub struct MpvNe {
 
 impl Default for MpvNe {
     fn default() -> Self {
+        let prefs = crate::settings::Settings::load();
+        set_custom_title_bar(prefs.interface.custom_title_bar);
         let mut app = Self {
             player: Player::default(),
             current_frame: None,
@@ -480,7 +611,12 @@ impl Default for MpvNe {
             modal_hook_installed: false,
             playlist: Vec::new(),
             playlist_idx: 0,
-            bindings: Bindings::default(),
+            bindings: Bindings {
+                drag_window_anywhere: prefs.interface.drag_anywhere,
+                ..Bindings::from_overrides(&prefs.keybindings)
+            },
+            keybinding_overrides: prefs.keybindings.clone(),
+            rebind_capture: None,
             last_left_press: None,
             chrome_force_hidden: false,
             cursor_pos: None,
@@ -490,7 +626,7 @@ impl Default for MpvNe {
             window_x_logical: 0,
             keyboard_modifiers: iced::keyboard::Modifiers::default(),
             window_y_logical: 0,
-            pinned: false,
+            pinned: prefs.interface.start_pinned,
             pip_active: false,
             pip_prev_w: 0.0,
             pip_prev_h: 0.0,
@@ -510,17 +646,27 @@ impl Default for MpvNe {
             thumb_cache: crate::thumbnail::new_cache(),
             after_playback: AfterPlayback::default(),
             modal: None,
-            resume_enabled: {
-                let s = crate::settings::Settings::load();
-                s.resume_enabled
-            },
+            resume_enabled: prefs.playback.resume_enabled,
             private_mode: false,
-            audio_normalize: crate::settings::Settings::load().audio_normalize,
-            audio_lang: crate::settings::Settings::load().audio_lang,
-            sub_lang: crate::settings::Settings::load().sub_lang,
-            precise_seek: crate::settings::Settings::load().precise_seek,
-            stream_quality_height: crate::settings::Settings::load().stream_quality_height,
-            screenshot_dir: crate::settings::Settings::load().screenshot_dir,
+            audio_normalize: prefs.audio.normalize,
+            audio_lang: prefs.audio.lang.clone(),
+            sub_lang: prefs.subtitles.lang.clone(),
+            precise_seek: prefs.playback.precise_seek,
+            stream_quality_height: prefs.streaming.quality_height,
+            screenshot_dir: prefs.playback.screenshot_dir.clone(),
+            snap_to_edge: prefs.interface.snap_to_edge,
+            remember_window: prefs.interface.remember_window,
+            start_pinned_pref: prefs.interface.start_pinned,
+            custom_title_bar_pref: prefs.interface.custom_title_bar,
+            osd_enabled: prefs.interface.osd_enabled,
+            thumbnail_preview: prefs.interface.thumbnail_preview,
+            auto_update_ytdlp: prefs.interface.auto_update_ytdlp,
+            hide_all_on_minimize: prefs.interface.hide_all_on_minimize,
+            pause_on_focus_lost: prefs.interface.pause_on_focus_lost,
+            pause_on_minimize: prefs.interface.pause_on_minimize,
+            main_window_was_minimized: false,
+            auto_load_siblings: prefs.interface.auto_load_siblings,
+            single_instance: prefs.interface.single_instance,
             pending_ytdl_url: None,
             suppress_volume_osd: false,
             suppress_speed_osd: true, // suppress the startup 1x event
@@ -532,6 +678,7 @@ impl Default for MpvNe {
             opensubtitles_api_key: String::new(),
             file_info_osd_shown: false,
             size_cache: std::collections::HashMap::new(),
+            playlist_url_meta: std::collections::HashMap::new(),
             video_rotate: 0,
             video_hflip: false,
             video_vflip: false,
@@ -546,6 +693,11 @@ impl Default for MpvNe {
             panel_window_id: None,
             panel_last_pos: None,
             panel_last_size: None,
+            app_settings_window_id: None,
+            app_settings_cursor_pos: None,
+            app_settings_last_pos: None,
+            app_settings_last_size: None,
+            app_settings_category: AppSettingsCategory::default(),
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
@@ -578,6 +730,15 @@ impl Default for MpvNe {
         app.player.set_audio_normalize(app.audio_normalize);
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
         app.player.set_stream_quality(app.stream_quality_height);
+        // Pad/truncate the saved gain list to the current band count rather
+        // than erroring - lets `player::EQ_BANDS` grow later without
+        // breaking older configs (same reasoning as the Settings migration).
+        let mut eq_gains = prefs.audio.eq_gains.clone();
+        eq_gains.resize(crate::player::EQ_BANDS.len(), 0.0);
+        app.player.eq_gains = eq_gains;
+        app.player.set_eq_enabled(prefs.audio.eq_enabled);
+        #[cfg(target_os = "windows")]
+        crate::win32_modal::set_snap_enabled(app.snap_to_edge);
         // If a previous session already auto-downloaded yt-dlp, use it
         // without waiting to discover that again on first URL open.
         if let Some(path) = ytdl_local_path() {
@@ -648,6 +809,36 @@ pub enum Message {
     TogglePip,
     TogglePrivateMode,
     ToggleAudioNormalize,
+    ToggleSnapToEdge,
+    ToggleDragAnywhere,
+    /// Takes a restart to actually apply - see `use_custom_title_bar`.
+    ToggleCustomTitleBar,
+    ToggleRememberWindow,
+    ToggleStartPinned,
+    ToggleOsdEnabled,
+    ToggleThumbnailPreview,
+    ToggleAutoUpdateYtdlp,
+    /// Keyboard settings page: begin capturing the next key press to bind
+    /// to this slot. See `MpvNe::rebind_capture`.
+    StartRebind(&'static str),
+    CancelRebind,
+    ResetRebind(&'static str),
+    ResetAllKeybindings,
+    ToggleAudioEq,
+    EqBandSet(usize, f64),
+    AudioEqReset,
+    ToggleHideAllOnMinimize,
+    TogglePauseOnFocusLost,
+    TogglePauseOnMinimize,
+    ToggleAutoLoadSiblings,
+    ToggleSingleInstance,
+    /// Windows-only: polls for a file path forwarded from a newer launch -
+    /// see `win32_modal::take_pending_open_file`.
+    PollSingleInstance,
+    /// Windows-only: polls `win32_modal::is_main_window_minimized` to
+    /// detect the minimize/restore transition (no direct iced event for
+    /// it - see subscription()).
+    MinimizeCheckTick,
     AudioLangInput(String),
     SubLangInput(String),
     TogglePreciseSeek,
@@ -724,6 +915,8 @@ pub enum Message {
     PlaylistLoaded(Vec<std::path::PathBuf>),
     OpenModal(ModalKind),
     ModalInput(String),
+    ModalPasteRequest,
+    ModalPasteResult(Option<String>),
     ModalConfirm,
     ModalCancel,
     NextChapter,
@@ -741,6 +934,9 @@ pub enum Message {
     YtdlpDownloadResult(Result<String, String>),
     ChooseScreenshotDir,
     ScreenshotDirSelected(String),
+    /// A playlist URL entry's metadata probe finished (title/duration/
+    /// uploader, or `None` if it couldn't be determined).
+    UrlMetaFetched(String, Option<UrlMeta>),
     ToggleResume,
     ToggleLoopFile,
     LoopFileChanged(bool),
@@ -794,6 +990,16 @@ pub enum Message {
     PanelMinimize,
     PanelDragWindow,
     PanelToggleMaximize,
+    /// Open the standalone App Settings window (Interface/Keyboard/...).
+    /// No-op if it's already open.
+    OpenAppSettings,
+    /// Close the App Settings window. Unlike the side panel, there's no
+    /// dock/undock distinction - it's always its own window.
+    CloseAppSettingsWindow,
+    AppSettingsCategorySelect(AppSettingsCategory),
+    AppSettingsMinimize,
+    AppSettingsDragWindow,
+    AppSettingsToggleMaximize,
     // Video zoom
     VideoZoomSet(f64),
     VideoZoomReset,
@@ -835,7 +1041,7 @@ pub enum Message {
     /// `captured` is true when a widget already handled the click. Edge-grip
     /// resize fires regardless; other actions only fire when !captured.
     InputMouseDown(iced::window::Id, iced::mouse::Button, bool),
-    InputScroll(f32),
+    InputScroll(iced::window::Id, f32),
     ModifiersChanged(iced::keyboard::Modifiers),
     /// Carries the source window's id so the handler can ignore movement
     /// over the menu popup window (which isn't the main window's cursor).
@@ -866,34 +1072,41 @@ impl MpvNe {
         // block). The real DPI scale factor isn't known until the window
         // exists and reports it, so this first request uses the saved
         // numbers as-is (correct at 100% scale) and gets corrected below.
-        let (w, h) = prefs.window_size().unwrap_or((1280.0, 720.0));
-        let position = prefs.window_x
-            .zip(prefs.window_y)
-            // Reject a saved position that isn't on any currently-connected
-            // monitor (e.g. the monitor it was saved on got disconnected or
-            // rearranged since) - otherwise the window would open off-screen
-            // and be unreachable, the same class of bug as the minimized-
-            // window sentinel position fixed earlier. No window exists yet
-            // at boot, so this has to be a standalone monitor query, not a
-            // window-relative one.
-            .filter(|&(x, y)| {
-                #[cfg(target_os = "windows")]
-                { crate::win32_modal::is_position_reachable(x, y) }
-                #[cfg(not(target_os = "windows"))]
-                { true }
-            })
-            .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)))
-            .unwrap_or(iced::window::Position::Centered);
-        let icon = iced::window::icon::from_file_data(
-            include_bytes!("../assets/MPV_NE_icon_hires.png"),
-            None,
-        ).ok();
+        // Skipped entirely when "remember window" is off - always open at
+        // the default size, centered.
+        let (w, h) = if prefs.interface.remember_window {
+            prefs.window_size().unwrap_or((1280.0, 720.0))
+        } else {
+            (1280.0, 720.0)
+        };
+        let position = if !prefs.interface.remember_window {
+            iced::window::Position::Centered
+        } else {
+            prefs.window.x
+                .zip(prefs.window.y)
+                // Reject a saved position that isn't on any currently-connected
+                // monitor (e.g. the monitor it was saved on got disconnected or
+                // rearranged since) - otherwise the window would open off-screen
+                // and be unreachable, the same class of bug as the minimized-
+                // window sentinel position fixed earlier. No window exists yet
+                // at boot, so this has to be a standalone monitor query, not a
+                // window-relative one.
+                .filter(|&(x, y)| {
+                    #[cfg(target_os = "windows")]
+                    { crate::win32_modal::is_position_reachable(x, y) }
+                    #[cfg(not(target_os = "windows"))]
+                    { true }
+                })
+                .map(|(x, y)| iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)))
+                .unwrap_or(iced::window::Position::Centered)
+        };
+        let icon = app_icon();
 
         let settings = iced::window::Settings {
             size: iced::Size::new(w, h),
             position,
             min_size: Some(iced::Size::new(360.0, 160.0)),
-            decorations: !USE_CUSTOM_TITLE_BAR,
+            decorations: !use_custom_title_bar(),
             icon,
             exit_on_close_request: false,
             ..Default::default()
@@ -912,7 +1125,15 @@ impl MpvNe {
                 iced::window::resize::<Message>(id, logical)
             })
         });
-        (app, correct_size)
+
+        let mut startup_tasks = vec![correct_size];
+        if app.pinned {
+            startup_tasks.push(iced::window::set_level(id, iced::window::Level::AlwaysOnTop));
+        }
+        if app.auto_update_ytdlp {
+            startup_tasks.push(Task::perform(download_ytdlp(), Message::YtdlpDownloadResult));
+        }
+        (app, Task::batch(startup_tasks))
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -954,7 +1175,7 @@ impl MpvNe {
             Message::VolumeChanged(vol) => {
                 self.player.set_volume(vol);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.volume = self.player.volume;
+                prefs.playback.volume = self.player.volume;
                 prefs.save();
                 if let Some(path) = &self.player.path.clone() {
                     self.resume_db.record_volume(path, self.player.volume);
@@ -970,6 +1191,10 @@ impl MpvNe {
             Message::WindowResized(id, size) => {
                 if Some(id) == self.panel_window_id {
                     self.panel_last_size = Some((size.width, size.height));
+                    return Task::none();
+                }
+                if Some(id) == self.app_settings_window_id {
+                    self.app_settings_last_size = Some((size.width, size.height));
                     return Task::none();
                 }
                 // The menu popup also fires an initial Resized on creation
@@ -996,7 +1221,7 @@ impl MpvNe {
                 if !self.render_initialized {
                     self.apply_render_size();
                     self.render_initialized = true;
-                    let saved_vol = crate::settings::Settings::load().volume;
+                    let saved_vol = crate::settings::Settings::load().playback.volume;
                     self.suppress_volume_osd = true;
                     self.player.set_volume(saved_vol);
                     // Apply saved screenshot dir if set.
@@ -1070,18 +1295,46 @@ impl MpvNe {
                         let save_w = (save_w_logical * dpi).round() as u32;
                         let save_h = (self.window_h_logical.max(0.0) * dpi).round() as u32;
                         crate::settings::Settings {
-                            window_w: Some(save_w),
-                            window_h: Some(save_h),
-                            window_x: Some(self.window_x_logical),
-                            window_y: Some(self.window_y_logical),
-                            resume_enabled: self.resume_enabled,
-                            volume: self.player.volume,
-                            screenshot_dir: self.screenshot_dir.clone(),
-                            audio_normalize: self.audio_normalize,
-                            audio_lang: self.audio_lang.clone(),
-                            sub_lang: self.sub_lang.clone(),
-                            precise_seek: self.precise_seek,
-                            stream_quality_height: self.stream_quality_height,
+                            window: crate::settings::WindowSettings {
+                                w: Some(save_w),
+                                h: Some(save_h),
+                                x: Some(self.window_x_logical),
+                                y: Some(self.window_y_logical),
+                            },
+                            playback: crate::settings::PlaybackSettings {
+                                resume_enabled: self.resume_enabled,
+                                volume: self.player.volume,
+                                precise_seek: self.precise_seek,
+                                screenshot_dir: self.screenshot_dir.clone(),
+                            },
+                            audio: crate::settings::AudioSettings {
+                                normalize: self.audio_normalize,
+                                lang: self.audio_lang.clone(),
+                                eq_enabled: self.player.eq_enabled,
+                                eq_gains: self.player.eq_gains.clone(),
+                            },
+                            subtitles: crate::settings::SubtitleSettings {
+                                lang: self.sub_lang.clone(),
+                            },
+                            streaming: crate::settings::StreamingSettings {
+                                quality_height: self.stream_quality_height,
+                            },
+                            interface: crate::settings::InterfaceSettings {
+                                snap_to_edge: self.snap_to_edge,
+                                drag_anywhere: self.bindings.drag_window_anywhere,
+                                custom_title_bar: self.custom_title_bar_pref,
+                                remember_window: self.remember_window,
+                                start_pinned: self.start_pinned_pref,
+                                osd_enabled: self.osd_enabled,
+                                thumbnail_preview: self.thumbnail_preview,
+                                auto_update_ytdlp: self.auto_update_ytdlp,
+                                hide_all_on_minimize: self.hide_all_on_minimize,
+                                pause_on_focus_lost: self.pause_on_focus_lost,
+                                pause_on_minimize: self.pause_on_minimize,
+                                auto_load_siblings: self.auto_load_siblings,
+                                single_instance: self.single_instance,
+                            },
+                            keybindings: self.keybinding_overrides.clone(),
                         }
                         .save();
                     }
@@ -1198,7 +1451,7 @@ impl MpvNe {
                 // Duration grew significantly beyond what thumbnails currently cover
                 // (e.g. a live file that's still being recorded).  Extend without
                 // clearing existing thumbnails so the user sees no gap.
-                {
+                if self.thumbnail_preview {
                     let covered = self.thumb_cache.lock().unwrap().covered_to;
                     if dur > covered + 30.0 {
                         if let Some(path) = &self.player.path.clone() {
@@ -1214,12 +1467,14 @@ impl MpvNe {
                     self.file_info_osd_shown = true;
 
                     // Spawn thumbnails - path is confirmed correct (not transitioning).
-                    if let Some(path) = &self.player.path.clone() {
-                        crate::thumbnail::spawn_generate(
-                            path.clone(),
-                            dur,
-                            self.thumb_cache.clone(),
-                        );
+                    if self.thumbnail_preview {
+                        if let Some(path) = &self.player.path.clone() {
+                            crate::thumbnail::spawn_generate(
+                                path.clone(),
+                                dur,
+                                self.thumb_cache.clone(),
+                            );
+                        }
                     }
 
                     let p = &self.player;
@@ -1637,6 +1892,9 @@ impl MpvNe {
             }
             Message::SpeedReset => self.player.set_speed(1.0),
             Message::ShowOsd(msg) => {
+                if !self.osd_enabled {
+                    return Task::none();
+                }
                 self.osd_message = msg;
                 self.osd_seq += 1;
                 let seq = self.osd_seq;
@@ -1654,7 +1912,7 @@ impl MpvNe {
                 }
             }
             Message::GenerateThumbnails(id) => {
-                if id != self.thumb_pending_id { return Task::none(); }
+                if id != self.thumb_pending_id || !self.thumbnail_preview { return Task::none(); }
                 if let Some(path) = &self.player.path.clone() {
                     tracing::debug!(dur = self.player.duration, "thumbnail: deferred generate");
                     crate::thumbnail::spawn_generate(
@@ -1880,8 +2138,17 @@ impl MpvNe {
                             let content = std::fs::read_to_string(h.path()).unwrap_or_default();
                             let paths: Vec<_> = content.lines()
                                 .filter(|l| !l.starts_with('#') && !l.is_empty())
-                                .map(|l| std::path::PathBuf::from(l.trim()))
-                                .filter(|p| p.exists())
+                                .map(|l| l.trim())
+                                // Keep URL entries unconditionally (they never
+                                // "exist" as a local path) - only filesystem
+                                // paths need the exists() check to drop stale
+                                // entries.
+                                .filter(|l| {
+                                    l.starts_with("http://") || l.starts_with("https://")
+                                        || l.starts_with("rtsp://") || l.starts_with("rtmp://")
+                                        || std::path::Path::new(l).exists()
+                                })
+                                .map(std::path::PathBuf::from)
                                 .collect();
                             Message::PlaylistLoaded(paths)
                         }
@@ -1892,11 +2159,19 @@ impl MpvNe {
             Message::PlaylistLoaded(paths) => {
                 if !paths.is_empty() {
                     let count = paths.len();
+                    let url_fetches: Vec<Task<Message>> = paths.iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+                        .map(|url| Task::perform(fetch_url_metadata(url), |(url, meta)| Message::UrlMetaFetched(url, meta)))
+                        .collect();
                     self.playlist = paths;
                     self.playlist_idx = 0;
                     let p = self.playlist[0].clone();
                     self.open_next(p.to_string_lossy().into_owned());
-                    return Task::done(Message::ShowOsd(format!("Loaded {count} files")));
+                    return Task::batch(
+                        std::iter::once(Task::done(Message::ShowOsd(format!("Loaded {count} files"))))
+                            .chain(url_fetches),
+                    );
                 }
             }
 
@@ -1907,12 +2182,22 @@ impl MpvNe {
                 let (title, prompt) = match kind {
                     ModalKind::JumpToTime => ("Jump to time", "Enter time (1:23:45 or seconds)"),
                     ModalKind::OpenUrl    => ("Open URL / stream", "Enter URL or file path"),
+                    ModalKind::AddPlaylistUrl => ("Add URL to playlist", "Enter URL or file path"),
                 };
                 self.modal = Some(ModalDialog { title, prompt, input: String::new(), kind });
             }
             Message::ModalInput(s) => {
                 if let Some(m) = &mut self.modal { m.input = s; }
             }
+            Message::ModalPasteRequest => {
+                if self.modal.is_some() {
+                    return iced::clipboard::read().map(Message::ModalPasteResult);
+                }
+            }
+            Message::ModalPasteResult(Some(text)) => {
+                if let Some(m) = &mut self.modal { m.input = text; }
+            }
+            Message::ModalPasteResult(None) => {}
             Message::ModalConfirm => {
                 if let Some(m) = self.modal.take() {
                     match m.kind {
@@ -1949,6 +2234,20 @@ impl MpvNe {
                                     self.recent_files.save();
                                     return Task::done(Message::ShowOsd(format!("Opening: {}", m.input)));
                                 }
+                            }
+                        }
+                        ModalKind::AddPlaylistUrl => {
+                            if !m.input.is_empty() {
+                                let was_empty = self.playlist.is_empty();
+                                self.playlist.push(std::path::PathBuf::from(&m.input));
+                                if was_empty {
+                                    self.playlist_idx = 0;
+                                }
+                                let url = m.input.clone();
+                                return Task::batch([
+                                    Task::done(Message::ShowOsd(format!("Added to playlist: {}", m.input))),
+                                    Task::perform(fetch_url_metadata(url), |(url, meta)| Message::UrlMetaFetched(url, meta)),
+                                ]);
                             }
                         }
                     }
@@ -2052,7 +2351,7 @@ impl MpvNe {
             Message::ToggleResume => {
                 self.resume_enabled = !self.resume_enabled;
                 let mut prefs = crate::settings::Settings::load();
-                prefs.resume_enabled = self.resume_enabled;
+                prefs.playback.resume_enabled = self.resume_enabled;
                 prefs.save();
             }
             Message::ToggleLoopFile => {
@@ -2175,7 +2474,8 @@ impl MpvNe {
                         size: iced::Size::new(size.0, size.1),
                         position,
                         resizable: true,
-                        decorations: !USE_CUSTOM_TITLE_BAR,
+                        decorations: !use_custom_title_bar(),
+                        icon: app_icon(),
                         exit_on_close_request: false,
                         ..Default::default()
                     };
@@ -2216,6 +2516,51 @@ impl MpvNe {
             }
             Message::PanelDragWindow => {
                 if let Some(id) = self.panel_window_id {
+                    return iced::window::drag(id);
+                }
+            }
+            Message::OpenAppSettings => {
+                if self.app_settings_window_id.is_none() {
+                    let size = self.app_settings_last_size.unwrap_or((760.0, 520.0));
+                    let position = match self.app_settings_last_pos {
+                        Some((x, y)) => iced::window::Position::Specific(iced::Point::new(x as f32, y as f32)),
+                        None => iced::window::Position::Centered,
+                    };
+                    let settings = iced::window::Settings {
+                        size: iced::Size::new(size.0, size.1),
+                        position,
+                        min_size: Some(iced::Size::new(480.0, 360.0)),
+                        resizable: true,
+                        decorations: !use_custom_title_bar(),
+                        icon: app_icon(),
+                        exit_on_close_request: false,
+                        ..Default::default()
+                    };
+                    let (id, open_task) = iced::window::open(settings);
+                    self.app_settings_window_id = Some(id);
+                    return open_task.discard();
+                }
+            }
+            Message::CloseAppSettingsWindow => {
+                if let Some(id) = self.app_settings_window_id.take() {
+                    return iced::window::close(id);
+                }
+            }
+            Message::AppSettingsCategorySelect(cat) => {
+                self.app_settings_category = cat;
+            }
+            Message::AppSettingsMinimize => {
+                if let Some(id) = self.app_settings_window_id {
+                    return iced::window::minimize(id, true);
+                }
+            }
+            Message::AppSettingsToggleMaximize => {
+                if let Some(id) = self.app_settings_window_id {
+                    return iced::window::toggle_maximize(id);
+                }
+            }
+            Message::AppSettingsDragWindow => {
+                if let Some(id) = self.app_settings_window_id {
                     return iced::window::drag(id);
                 }
             }
@@ -2333,6 +2678,11 @@ impl MpvNe {
                     if x > SENTINEL_THRESHOLD && y > SENTINEL_THRESHOLD {
                         self.panel_last_pos = Some((x, y));
                     }
+                } else if Some(id) == self.app_settings_window_id {
+                    const SENTINEL_THRESHOLD: i32 = -10_000;
+                    if x > SENTINEL_THRESHOLD && y > SENTINEL_THRESHOLD {
+                        self.app_settings_last_pos = Some((x, y));
+                    }
                 }
             }
 
@@ -2428,8 +2778,13 @@ impl MpvNe {
                 self.screenshot_dir = dir.clone();
                 self.player.set_screenshot_dir(&dir);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.screenshot_dir = dir;
+                prefs.playback.screenshot_dir = dir;
                 prefs.save();
+            }
+            Message::UrlMetaFetched(url, meta) => {
+                if let Some(meta) = meta {
+                    self.playlist_url_meta.insert(url, meta);
+                }
             }
 
             Message::Noop => {}
@@ -2449,12 +2804,17 @@ impl MpvNe {
                     if let Some(panel_id) = self.panel_window_id {
                         tasks.push(iced::window::close(panel_id));
                     }
+                    if let Some(settings_id) = self.app_settings_window_id {
+                        tasks.push(iced::window::close(settings_id));
+                    }
                     tasks.push(iced::exit());
                     return Task::batch(tasks);
                 } else if Some(id) == self.menu_window_id {
                     return self.close_main_menu();
                 } else if Some(id) == self.panel_window_id {
                     return Task::done(Message::ClosePanelWindow);
+                } else if Some(id) == self.app_settings_window_id {
+                    return Task::done(Message::CloseAppSettingsWindow);
                 }
             }
 
@@ -2683,34 +3043,205 @@ impl MpvNe {
                 self.audio_normalize = !self.audio_normalize;
                 self.player.set_audio_normalize(self.audio_normalize);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.audio_normalize = self.audio_normalize;
+                prefs.audio.normalize = self.audio_normalize;
                 prefs.save();
+            }
+            Message::ToggleAudioEq => {
+                self.player.set_eq_enabled(!self.player.eq_enabled);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio.eq_enabled = self.player.eq_enabled;
+                prefs.save();
+            }
+            Message::EqBandSet(band, gain) => {
+                self.player.set_eq_band(band, gain);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio.eq_gains = self.player.eq_gains.clone();
+                prefs.save();
+            }
+            Message::AudioEqReset => {
+                self.player.reset_eq();
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio.eq_gains = self.player.eq_gains.clone();
+                prefs.save();
+            }
+            Message::ToggleHideAllOnMinimize => {
+                self.hide_all_on_minimize = !self.hide_all_on_minimize;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.hide_all_on_minimize = self.hide_all_on_minimize;
+                prefs.save();
+            }
+            Message::TogglePauseOnFocusLost => {
+                self.pause_on_focus_lost = !self.pause_on_focus_lost;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.pause_on_focus_lost = self.pause_on_focus_lost;
+                prefs.save();
+            }
+            Message::TogglePauseOnMinimize => {
+                self.pause_on_minimize = !self.pause_on_minimize;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.pause_on_minimize = self.pause_on_minimize;
+                prefs.save();
+            }
+            Message::ToggleAutoLoadSiblings => {
+                self.auto_load_siblings = !self.auto_load_siblings;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.auto_load_siblings = self.auto_load_siblings;
+                prefs.save();
+            }
+            Message::ToggleSingleInstance => {
+                // Only the persisted preference changes here - the actual
+                // mutex claim happens once at startup in main(), so this
+                // takes effect on next launch, same as custom_title_bar.
+                self.single_instance = !self.single_instance;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.single_instance = self.single_instance;
+                prefs.save();
+                return Task::done(Message::ShowOsd(
+                    if self.single_instance { "Restart to enable single-instance mode".into() }
+                    else { "Restart to allow multiple instances again".into() }
+                ));
+            }
+            #[cfg(target_os = "windows")]
+            Message::PollSingleInstance => {
+                if let Some(path) = crate::win32_modal::take_pending_open_file() {
+                    if !path.is_empty() {
+                        self.load_path(std::path::PathBuf::from(path));
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            Message::PollSingleInstance => {}
+            Message::MinimizeCheckTick => {
+                #[cfg(target_os = "windows")]
+                {
+                    let now_minimized = crate::win32_modal::is_main_window_minimized();
+                    if now_minimized && !self.main_window_was_minimized {
+                        self.main_window_was_minimized = true;
+                        if self.pause_on_minimize && !self.player.paused {
+                            self.player.pause();
+                        }
+                        if self.hide_all_on_minimize {
+                            let mut tasks = Vec::new();
+                            if let Some(id) = self.panel_window_id {
+                                tasks.push(iced::window::minimize(id, true));
+                            }
+                            if let Some(id) = self.app_settings_window_id {
+                                tasks.push(iced::window::minimize(id, true));
+                            }
+                            return Task::batch(tasks);
+                        }
+                    } else if !now_minimized && self.main_window_was_minimized {
+                        self.main_window_was_minimized = false;
+                        if self.hide_all_on_minimize {
+                            let mut tasks = Vec::new();
+                            if let Some(id) = self.panel_window_id {
+                                tasks.push(iced::window::minimize(id, false));
+                            }
+                            if let Some(id) = self.app_settings_window_id {
+                                tasks.push(iced::window::minimize(id, false));
+                            }
+                            return Task::batch(tasks);
+                        }
+                    }
+                }
+            }
+            Message::ToggleSnapToEdge => {
+                self.snap_to_edge = !self.snap_to_edge;
+                #[cfg(target_os = "windows")]
+                crate::win32_modal::set_snap_enabled(self.snap_to_edge);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.snap_to_edge = self.snap_to_edge;
+                prefs.save();
+            }
+            Message::ToggleDragAnywhere => {
+                self.bindings.drag_window_anywhere = !self.bindings.drag_window_anywhere;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.drag_anywhere = self.bindings.drag_window_anywhere;
+                prefs.save();
+            }
+            Message::ToggleCustomTitleBar => {
+                // Deliberately does NOT call set_custom_title_bar() - see
+                // `custom_title_bar_pref`'s doc comment. Only the saved
+                // preference changes; the live flag (and therefore every
+                // window's decorations for the rest of this session) stays
+                // put until restart.
+                self.custom_title_bar_pref = !self.custom_title_bar_pref;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.custom_title_bar = self.custom_title_bar_pref;
+                prefs.save();
+                return Task::done(Message::ShowOsd("Restart MPV-NE to apply".into()));
+            }
+            Message::ToggleRememberWindow => {
+                self.remember_window = !self.remember_window;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.remember_window = self.remember_window;
+                prefs.save();
+            }
+            Message::ToggleStartPinned => {
+                self.start_pinned_pref = !self.start_pinned_pref;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.start_pinned = self.start_pinned_pref;
+                prefs.save();
+            }
+            Message::ToggleOsdEnabled => {
+                self.osd_enabled = !self.osd_enabled;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.osd_enabled = self.osd_enabled;
+                prefs.save();
+            }
+            Message::ToggleThumbnailPreview => {
+                self.thumbnail_preview = !self.thumbnail_preview;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.thumbnail_preview = self.thumbnail_preview;
+                prefs.save();
+            }
+            Message::ToggleAutoUpdateYtdlp => {
+                self.auto_update_ytdlp = !self.auto_update_ytdlp;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.auto_update_ytdlp = self.auto_update_ytdlp;
+                prefs.save();
+            }
+            Message::StartRebind(slot_id) => {
+                self.rebind_capture = Some(slot_id);
+            }
+            Message::CancelRebind => {
+                self.rebind_capture = None;
+            }
+            Message::ResetRebind(slot_id) => {
+                self.keybinding_overrides.remove(slot_id);
+                self.rebuild_bindings();
+                self.persist_keybindings();
+            }
+            Message::ResetAllKeybindings => {
+                self.keybinding_overrides.clear();
+                self.rebuild_bindings();
+                self.persist_keybindings();
             }
             Message::AudioLangInput(s) => {
                 self.audio_lang = s;
                 self.player.set_lang_priority(&self.audio_lang, &self.sub_lang);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.audio_lang = self.audio_lang.clone();
+                prefs.audio.lang = self.audio_lang.clone();
                 prefs.save();
             }
             Message::SubLangInput(s) => {
                 self.sub_lang = s;
                 self.player.set_lang_priority(&self.audio_lang, &self.sub_lang);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.sub_lang = self.sub_lang.clone();
+                prefs.subtitles.lang = self.sub_lang.clone();
                 prefs.save();
             }
             Message::TogglePreciseSeek => {
                 self.precise_seek = !self.precise_seek;
                 let mut prefs = crate::settings::Settings::load();
-                prefs.precise_seek = self.precise_seek;
+                prefs.playback.precise_seek = self.precise_seek;
                 prefs.save();
             }
             Message::StreamQualitySet(height) => {
                 self.stream_quality_height = height;
                 self.player.set_stream_quality(height);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.stream_quality_height = height;
+                prefs.streaming.quality_height = height;
                 prefs.save();
             }
             Message::ToggleChrome => {
@@ -2802,7 +3333,7 @@ impl MpvNe {
             Message::VolumeAdjust(delta) => {
                 self.player.set_volume(self.player.volume + delta);
                 let mut prefs = crate::settings::Settings::load();
-                prefs.volume = self.player.volume;
+                prefs.playback.volume = self.player.volume;
                 prefs.save();
                 return Task::done(Message::ShowOsd(format!("Volume  {:.0}%", self.player.volume)));
             }
@@ -2813,6 +3344,8 @@ impl MpvNe {
                     self.cursor_pos = Some((x, y));
                 } else if Some(id) == self.panel_window_id {
                     self.panel_cursor_pos = Some((x, y));
+                } else if Some(id) == self.app_settings_window_id {
+                    self.app_settings_cursor_pos = Some((x, y));
                 }
             }
             Message::CursorLeft(id) => {
@@ -2820,11 +3353,16 @@ impl MpvNe {
                     self.cursor_pos = None;
                 } else if Some(id) == self.panel_window_id {
                     self.panel_cursor_pos = None;
+                } else if Some(id) == self.app_settings_window_id {
+                    self.app_settings_cursor_pos = None;
                 }
             }
             Message::WindowUnfocused(id) => {
                 if Some(id) == self.menu_window_id {
                     return self.close_main_menu();
+                }
+                if Some(id) == self.window_id && self.pause_on_focus_lost && !self.player.paused {
+                    self.player.pause();
                 }
             }
             Message::WindowRescaled(id, factor) => {
@@ -2838,6 +3376,17 @@ impl MpvNe {
                 }
             }
             Message::InputKey(name) => {
+                // A rebind is in progress - this key press is the new
+                // binding (or, for Escape, a cancel), not a normal action
+                // trigger. Consume it here so it can't also fire whatever
+                // it used to be bound to (e.g. rebinding "m" wouldn't also
+                // mute while this is happening).
+                if let Some(slot_id) = self.rebind_capture.take() {
+                    if name != "escape" {
+                        self.apply_key_rebind(slot_id, name);
+                    }
+                    return Task::none();
+                }
                 // Escape closes the modal first.
                 if name == "escape" && self.modal.is_some() {
                     self.modal = None;
@@ -2896,7 +3445,14 @@ impl MpvNe {
             }
             Message::ModifiersChanged(m) => self.keyboard_modifiers = m,
 
-            Message::InputScroll(dy) => {
+            Message::InputScroll(event_window, dy) => {
+                // Only the main window's video/controls area drives
+                // volume/seek via scroll - the detached panel and App
+                // Settings windows never should, even when the scroll
+                // lands on non-scrollable empty space in them.
+                if Some(event_window) != self.window_id {
+                    return Task::none();
+                }
                 let over_panel = self.active_panel.is_some()
                     && self.cursor_pos
                         .map(|(x, _)| x > self.window_w_logical - 280.0)
@@ -2928,6 +3484,12 @@ impl MpvNe {
                     // preserve, so check it first and bail out early.
                     if Some(event_window) == self.panel_window_id {
                         if let Some(direction) = self.panel_cursor_edge_direction() {
+                            return iced::window::drag_resize(event_window, direction);
+                        }
+                        return Task::none();
+                    }
+                    if Some(event_window) == self.app_settings_window_id {
+                        if let Some(direction) = self.app_settings_cursor_edge_direction() {
                             return iced::window::drag_resize(event_window, direction);
                         }
                         return Task::none();
@@ -3017,6 +3579,8 @@ impl MpvNe {
             ui::menu_window_view(self)
         } else if Some(window) == self.panel_window_id {
             ui::panel_window_view(self)
+        } else if Some(window) == self.app_settings_window_id {
+            ui::app_settings::view(self)
         } else {
             ui::view(self)
         }
@@ -3072,6 +3636,53 @@ impl MpvNe {
         (nx, ny)
     }
 
+    /// The key currently bound to `slot_id`, or `None` if that slot was
+    /// explicitly cleared. Used by the Keyboard settings page to display the
+    /// current binding without duplicating `Bindings::from_overrides`' logic.
+    pub fn resolved_key_for_slot(&self, slot_id: &str) -> Option<String> {
+        let (_, _, default_key, _) = KEY_SLOTS.iter().find(|(id, ..)| *id == slot_id)?;
+        match self.keybinding_overrides.get(slot_id) {
+            Some(k) if k.is_empty() => None,
+            Some(k) => Some(k.clone()),
+            None => Some((*default_key).to_string()),
+        }
+    }
+
+    /// Rebind `slot_id` to `key`, stealing the key from whichever other slot
+    /// currently holds it (if any) since two actions can't share one
+    /// physical key - the other slot becomes explicitly unbound rather than
+    /// silently falling back to its default and colliding again.
+    fn apply_key_rebind(&mut self, slot_id: &'static str, key: String) {
+        for (other_id, _, default_key, _) in KEY_SLOTS {
+            if *other_id == slot_id {
+                continue;
+            }
+            let other_key = self.keybinding_overrides.get(*other_id)
+                .map(|s| s.as_str())
+                .unwrap_or(default_key);
+            if other_key == key {
+                self.keybinding_overrides.insert(other_id.to_string(), String::new());
+            }
+        }
+        self.keybinding_overrides.insert(slot_id.to_string(), key);
+        self.rebuild_bindings();
+        self.persist_keybindings();
+    }
+
+    fn rebuild_bindings(&mut self) {
+        let drag_window_anywhere = self.bindings.drag_window_anywhere;
+        self.bindings = Bindings {
+            drag_window_anywhere,
+            ..Bindings::from_overrides(&self.keybinding_overrides)
+        };
+    }
+
+    fn persist_keybindings(&self) {
+        let mut prefs = crate::settings::Settings::load();
+        prefs.keybindings = self.keybinding_overrides.clone();
+        prefs.save();
+    }
+
     /// True when the controls bar should be drawn. Hidden in fullscreen or
     /// when the user has manually toggled chrome off.
     pub fn chrome_visible(&self) -> bool {
@@ -3106,7 +3717,7 @@ impl MpvNe {
     /// Windows resize zones (a couple of logical pixels outside the visible
     /// border + a few inside).
     pub fn cursor_edge_direction(&self) -> Option<iced::window::Direction> {
-        if !USE_CUSTOM_TITLE_BAR || self.fullscreen {
+        if !use_custom_title_bar() || self.fullscreen {
             return None;
         }
         edge_direction_for(self.cursor_pos?, self.window_w_logical, self.window_h_logical)
@@ -3116,11 +3727,20 @@ impl MpvNe {
     /// window - it also has no OS-drawn resize handles (custom chrome), so
     /// it needs the same manual edge detection to be resizable at all.
     pub fn panel_cursor_edge_direction(&self) -> Option<iced::window::Direction> {
-        if !USE_CUSTOM_TITLE_BAR {
+        if !use_custom_title_bar() {
             return None;
         }
         let (w, h) = self.panel_last_size.unwrap_or((PANEL_W, 640.0));
         edge_direction_for(self.panel_cursor_pos?, w, h)
+    }
+
+    /// Same idea, for the standalone App Settings window.
+    pub fn app_settings_cursor_edge_direction(&self) -> Option<iced::window::Direction> {
+        if !use_custom_title_bar() {
+            return None;
+        }
+        let (w, h) = self.app_settings_last_size.unwrap_or((760.0, 520.0));
+        edge_direction_for(self.app_settings_cursor_pos?, w, h)
     }
 
     /// Same idea for the top bar - cursor in the top band reveals it as an
@@ -3287,7 +3907,11 @@ impl MpvNe {
     fn load_path(&mut self, path: std::path::PathBuf) {
         self.recent_files.record(&path);
         self.recent_files.save();
-        let (list, idx) = build_folder_playlist(&path);
+        let (list, idx) = if self.auto_load_siblings {
+            build_folder_playlist(&path)
+        } else {
+            (vec![path.clone()], 0)
+        };
         self.playlist = list;
         self.playlist_idx = idx;
         self.open_next(path.to_string_lossy().into_owned());
@@ -3383,8 +4007,14 @@ impl MpvNe {
     /// Daemon API wrapper - the window id is unused since the title never
     /// varies per-window. `title_str` below is the real logic, callable
     /// directly from UI code that doesn't have (and doesn't need) an id.
-    pub fn title(&self, _window: iced::window::Id) -> String {
-        self.title_str()
+    pub fn title(&self, window: iced::window::Id) -> String {
+        if Some(window) == self.app_settings_window_id {
+            "MPV-NE - Settings".to_string()
+        } else if Some(window) == self.panel_window_id {
+            "MPV-NE - Panel".to_string()
+        } else {
+            self.title_str()
+        }
     }
 
     pub fn title_str(&self) -> String {
@@ -3427,6 +4057,25 @@ impl MpvNe {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(500))
                     .map(|_| Message::StatsTick),
+            );
+        }
+        // Poll for the main window minimize/restore transition - no direct
+        // iced event for it (see `win32_modal::is_main_window_minimized`).
+        // Only runs when a preference that cares about it is on.
+        #[cfg(target_os = "windows")]
+        if self.hide_all_on_minimize || self.pause_on_minimize {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(400))
+                    .map(|_| Message::MinimizeCheckTick),
+            );
+        }
+        // Poll for a file forwarded from a newer launch (single-instance
+        // mode) - only runs when that mode is actually on.
+        #[cfg(target_os = "windows")]
+        if self.single_instance {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(500))
+                    .map(|_| Message::PollSingleInstance),
             );
         }
         Subscription::batch(subs)
@@ -3528,6 +4177,72 @@ fn ytdl_local_path() -> Option<std::path::PathBuf> {
     let dirs = directories::ProjectDirs::from("", "", "mpv-ne")?;
     let name = if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" };
     Some(dirs.data_dir().join(name))
+}
+
+/// Title/duration/uploader probed for a playlist URL entry via yt-dlp's
+/// metadata-only mode - see `fetch_url_metadata`.
+#[derive(Debug, Clone)]
+pub struct UrlMeta {
+    pub title: String,
+    pub duration: Option<f64>,
+    pub uploader: Option<String>,
+}
+
+/// Resolve which yt-dlp/youtube-dl binary to invoke, preferring PATH over
+/// the auto-downloaded local copy - same search order as `ytdl_available`.
+fn ytdl_binary() -> Option<String> {
+    let on_path = |bin: &str| {
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("--version").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.status().is_ok_and(|s| s.success())
+    };
+    if on_path("yt-dlp") { return Some("yt-dlp".into()); }
+    if on_path("youtube-dl") { return Some("youtube-dl".into()); }
+    ytdl_local_path().filter(|p| p.exists()).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Probe a URL for a display title (and duration/uploader if available) via
+/// yt-dlp's metadata-only mode (`-j --skip-download`) - nothing is
+/// downloaded or played, just yt-dlp's own extractor info. Returns `None`
+/// silently if yt-dlp isn't available or the URL can't be probed - the
+/// playlist just keeps showing the raw URL in that case, same as before
+/// this existed.
+async fn fetch_url_metadata(url: String) -> (String, Option<UrlMeta>) {
+    let Some(bin) = ytdl_binary() else { return (url, None) };
+    let url_for_cmd = url.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        #[allow(unused_mut)]
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.args(["-j", "--no-warnings", "--skip-download", "--no-playlist", &url_for_cmd]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.output()
+    }).await;
+
+    let Ok(Ok(output)) = output else { return (url, None) };
+    if !output.status.success() {
+        return (url, None);
+    }
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return (url, None);
+    };
+    let Some(title) = json.get("title").and_then(|v| v.as_str()).map(str::to_string) else {
+        return (url, None);
+    };
+    let duration = json.get("duration").and_then(|v| v.as_f64());
+    let uploader = json.get("uploader").and_then(|v| v.as_str()).map(str::to_string);
+    (url, Some(UrlMeta { title, duration, uploader }))
 }
 
 /// Download yt-dlp's latest release into `ytdl_local_path()`. yt-dlp is
@@ -3754,6 +4469,27 @@ fn on_window_event(
             Some(Message::InputMouseDown(id, button, captured))
         }
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            // A modern mouse can report movement hundreds of times a second;
+            // each one triggers a full app rebuild (this app's view() has no
+            // partial-update path, like most iced apps). The heavy panels
+            // (settings/menu) are now memoized via `lazy`, but the main
+            // window's top/controls bar aren't (they need live position
+            // updates anyway) - so cursor-driven rebuilds and video-frame-
+            // driven rebuilds are two independent triggers on that same
+            // still-nontrivial tree. Matching this to the frame-delivery
+            // throttle (33ms/~30fps, see init_and_render_loop) instead of a
+            // separate faster 60Hz cap keeps the two from compounding to
+            // ~90 rebuilds/sec when both are happening at once (playing
+            // while moving the mouse) - still smooth for hover/edge-resize
+            // purposes.
+            static LAST_CURSOR_MOVE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            const CURSOR_THROTTLE: std::time::Duration = std::time::Duration::from_millis(33);
+            let now = std::time::Instant::now();
+            let mut last = LAST_CURSOR_MOVE.lock().unwrap();
+            if last.is_some_and(|t| now.duration_since(t) < CURSOR_THROTTLE) {
+                return None;
+            }
+            *last = Some(now);
             Some(Message::CursorMoved(id, position.x, position.y))
         }
         Event::Mouse(iced::mouse::Event::CursorLeft) => Some(Message::CursorLeft(id)),
@@ -3762,11 +4498,19 @@ fn on_window_event(
             Some(Message::WindowRescaled(id, factor))
         }
         Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+            // A scrollable widget under the cursor (settings panel, playlist,
+            // etc.) already consumed this - don't also treat it as a
+            // volume/seek scroll. Without this check, scrolling a list
+            // inside the settings panel scrolled the list AND adjusted
+            // volume at the same time.
+            if matches!(status, iced::event::Status::Captured) {
+                return None;
+            }
             let dy = match delta {
                 iced::mouse::ScrollDelta::Lines { y, .. } => y,
                 iced::mouse::ScrollDelta::Pixels { y, .. } => y,
             };
-            Some(Message::InputScroll(dy))
+            Some(Message::InputScroll(id, dy))
         }
         Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
             Some(Message::ModifiersChanged(m))

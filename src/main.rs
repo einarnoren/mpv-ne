@@ -27,6 +27,25 @@ fn main() -> iced::Result {
         )
         .init();
 
+    // Single-instance mode (off by default - see Settings::interface):
+    // if another instance is already running, hand off whatever file/URL
+    // was passed on the command line to it and exit immediately, before
+    // creating any window or touching mpv at all.
+    #[cfg(target_os = "windows")]
+    {
+        let prefs = settings::Settings::load();
+        if prefs.interface.single_instance {
+            if let Some(other_hwnd) = win32_modal::try_claim_single_instance() {
+                if let Some(path) = std::env::args().nth(1) {
+                    win32_modal::send_open_file_to(other_hwnd, &path);
+                } else {
+                    win32_modal::send_open_file_to(other_hwnd, "");
+                }
+                return Ok(());
+            }
+        }
+    }
+
     // `daemon` (rather than `application`) because the floating main-menu
     // popup needs to be a genuine second OS window with its own content —
     // `application`'s view has no window::Id parameter, so every window

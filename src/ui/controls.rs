@@ -93,6 +93,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let ab_a      = app.ab_loop_a;
     let ab_b      = app.ab_loop_b;
     let cache_time = app.player.cache_time;
+    let bookmarks: &[crate::resume::Bookmark] = app.player.path.as_deref()
+        .map(|p| app.resume_db.bookmarks(p))
+        .unwrap_or(&[]);
     // Slider default height is ~22px; pin the wrapper to that so it doesn't
     // gobble all vertical space and shove the bottom row down.
     // Seekbar hover time: compute from cursor X relative to the seekbar area.
@@ -108,7 +111,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         // Only meaningful for network streams; local files cache instantly.
         let has_cache = duration > 0.0 && cache_time > position + 1.0;
         let has_markers = duration > 0.0
-            && (!chapters.is_empty() || ab_a.is_some() || ab_b.is_some());
+            && (!chapters.is_empty() || ab_a.is_some() || ab_b.is_some() || !bookmarks.is_empty());
         if !has_markers && !has_cache {
             return base;
         }
@@ -201,6 +204,39 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             })
             .on_press(Message::Seek(chap.time));
             layers.push(pin(tick).x(x.max(0.0)).y(0.0).into());
+        }
+
+        // Bookmark markers: small dots at the top edge, distinct from
+        // chapters' full-height bars so the two don't visually blend
+        // together when a file has both.
+        const BM_W: f32 = 6.0;
+        for bm in bookmarks {
+            if bm.position <= 0.0 || bm.position >= duration {
+                continue;
+            }
+            let x = (bm.position as f32 / duration as f32) * size.width - BM_W / 2.0;
+            let dot = iced::widget::button(
+                Space::new().width(Length::Fixed(BM_W)).height(Length::Fixed(BM_W)),
+            )
+            .padding(0)
+            .style(|_t, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => AURORA_TEAL,
+                    _ => AURORA_GREEN,
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    text_color: iced::Color::TRANSPARENT,
+                    border: iced::Border {
+                        radius: iced::border::Radius::new(3.0),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::Seek(bm.position));
+            layers.push(pin(dot).x(x.max(0.0)).y(0.0).into());
         }
         stack(layers).into()
     })

@@ -1,4 +1,4 @@
-//! Top bar - acts as a full custom title bar when `USE_CUSTOM_TITLE_BAR` is
+//! Top bar - acts as a full custom title bar when `use_custom_title_bar()` is
 //! true (with drag region, pin, fullscreen, minimize, maximize, close). When
 //! false it stays as a "below the OS title bar" mini-bar with just pin and
 //! fullscreen, leaving the OS to draw min/max/close.
@@ -9,7 +9,7 @@ use iced::{
 };
 
 use super::{AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_DEEPEST, BG_SURFACE, TEXT_BRIGHT, icons};
-use crate::app::{Message, MpvNe, USE_CUSTOM_TITLE_BAR};
+use crate::app::{Message, MpvNe, use_custom_title_bar};
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Title text: always show the current file name (or "MPV-NE" when idle).
@@ -153,7 +153,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         buttons = buttons.push(badge);
     }
 
-    if USE_CUSTOM_TITLE_BAR {
+    if use_custom_title_bar() {
         let min_btn = icons::tipped(
             icons::square_btn(icons::window_minimize()).on_press(Message::MinimizeWindow),
             "Minimize",

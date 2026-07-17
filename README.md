@@ -16,18 +16,20 @@ inspired by [PotPlayer](https://potplayer.tv/).
 - **Picture-in-picture mode** - shrink to a small always-on-top corner window
 - Seekbar thumbnail scrub preview (generated in background, no ffmpeg required)
 - **Live/growing file support** - designed for active recordings still being written to disk; `End` key jumps to the live edge with automatic catch-up, and playback resumes automatically as new content is buffered. Works with any format mpv can stream (MKV, TS, fragmented MP4, …)
-- **Network streams** - paste a URL (direct link, RTSP/HLS, or a YouTube/Twitch/etc. link) via Open URL; yt-dlp is fetched automatically the first time it's needed
+- **Network streams** - paste a URL (direct link, RTSP/HLS, or a YouTube/Twitch/etc. link) via Open URL, or add one straight to the playlist; yt-dlp is fetched automatically the first time it's needed, and playlist URLs resolve their real title/duration/uploader in the background
 - Playlist with sort, shuffle, save/load (.m3u); file browser (with back/forward history) & recent files panels, including recently opened streams
 - Right-click context menu on the video, with a matching floating main menu
-- Video equaliser (brightness, contrast, saturation, hue, gamma)
+- **Standalone Settings window** (Interface / Keyboard), separate from the playback-focused settings panel docked to the video - includes full keyboard shortcut remapping (click to rebind, reset per-action or all at once)
+- 10-band audio equaliser, alongside the existing video equaliser (brightness, contrast, saturation, hue, gamma)
 - Audio normalizer, per-file remembered volume/audio-track/subtitle-track
 - Subtitle search via OpenSubtitles.com
-- A-B loop, chapter navigation, named bookmarks
+- A-B loop, chapter navigation, named bookmarks - both shown as markers on the seek bar
 - Stats overlay (bitrate, fps, dropped frames, buffer)
-- Snap-to-screen-edge window behaviour; remembered window position, validated against connected monitors
+- Snap-to-screen-edge window behaviour (toggleable); remembered window position, validated against connected monitors
+- Optional single-instance mode - opening another file hands it to the already-running window instead of starting a new process
 - Resume playback from last position
 - Private/no-trace mode - suppresses all of the above history for the session
-- And more - see the Settings panel
+- And more - see the Settings panel and window
 
 ---
 
@@ -121,13 +123,13 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 - File associations (register as default player)
 - Frame-by-frame stepping
 - Configurable seek step size
-- In-app keyboard shortcut remapping
 - Minimize to system tray
+- Windows: system media transport controls (media-key/lock-screen integration), taskbar thumbnail buttons
 - Linux and macOS support (untested)
 
 ## Version
 
-0.3.5 - see [CHANGELOG](CHANGELOG.md)
+0.4.0 - see [CHANGELOG](CHANGELOG.md)
 
 ## Licence
 

@@ -6,6 +6,74 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.0] — 2026-07-16
+
+The settings rework release - a new standalone Settings window, persisted
+settings rebuilt to be extensible, keyboard remapping, an audio equaliser,
+playlist URL support, and a pass on UI stutter during playback.
+
+### Settings window
+- New standalone **Settings** window (Interface / Keyboard), separate from
+  the playback-focused settings panel docked next to the video - matches the
+  main window's chrome, has its own taskbar icon, remembers position/size.
+- **Keyboard remapping** - click a binding, press the new key; reset one
+  action or all of them; conflicts are resolved by freeing the key from
+  whichever action previously held it.
+- Interface toggles: resume playback, window edge/sibling-window snapping,
+  drag-window-from-anywhere, remember window position/size, start pinned,
+  OSD notifications, seekbar thumbnail preview, custom title bar (OS vs.
+  app-drawn - requires restart), auto-update yt-dlp, hide all windows when
+  minimized, pause on focus loss, pause on minimize, auto-load sibling files
+  into the playlist, and an opt-in single-instance mode (Windows).
+- The docked panel's settings tab is now playback-only and labeled
+  accordingly, to stay distinct from the new window.
+
+### Persisted settings
+- Rewritten from one flat struct to nested, versioned sections
+  (window/playback/audio/subtitles/streaming/interface/keybindings), each
+  independently defaulted - a config from an older version, or one missing
+  a field a newer version added, loads cleanly instead of erroring. Old
+  flat-format configs are migrated automatically on first load.
+
+### Audio
+- 10-band graphic equaliser (own frequency set), alongside the existing
+  video equaliser.
+
+### Playlist
+- Add a URL/stream directly to the playlist; its real title, duration, and
+  uploader resolve in the background via yt-dlp and replace the raw URL
+  once known.
+- Bookmark markers on the seek bar (chapters already had them).
+- Fixed: loading a saved `.m3u` playlist silently dropped any URL entries
+  (they were being filtered by a local-file-existence check that a URL can
+  never pass).
+- Fixed: switching to a URL playlist entry sometimes loaded but never
+  rendered a frame until pause was toggled twice - mpv's own internal
+  `pause` property wasn't being explicitly cleared on file/URL open, only
+  our own tracked flag was.
+
+### Single instance (Windows, opt-in)
+- When enabled, opening a second file hands it to the already-running
+  window (via a named mutex + window message) instead of starting a new
+  process, and brings that window to the foreground.
+
+### Performance
+- Fixed significant UI stutter during playback, worst with the Settings
+  window or main menu open while moving the mouse. Root causes: several
+  high-frequency event sources (video frame delivery, mpv's `time-pos`/
+  `demuxer-cache-time` property updates, cursor movement) each forced a
+  full rebuild of the *entire* UI, panels included, and cursor-move and
+  frame-delivery rebuilds weren't rate-matched so they compounded. Fixed by
+  throttling all of the above to sane, still-smooth rates, and by
+  memoizing the three heaviest panels (playback settings, the new Settings
+  window, the main menu) so they only rebuild when something they actually
+  display changes rather than on every video frame.
+
+### Other
+- Right-click paste in text input fields (Open URL, etc.) - previously only
+  Ctrl+V worked.
+- Scrolling inside a panel no longer also adjusts volume.
+
 ## [0.3.5] — 2026-07-12
 
 ### Network Streaming

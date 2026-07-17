@@ -30,16 +30,53 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     } else {
         let rows = app.playlist.iter().enumerate().map(|(i, path)| {
             let is_current = i == app.playlist_idx;
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            let path_str = path.to_string_lossy();
+            let is_url = path_str.starts_with("http://") || path_str.starts_with("https://");
+            let url_meta = if is_url { app.playlist_url_meta.get(path_str.as_ref()) } else { None };
+            // A URL's file_name()/parent() split reads as garbled nonsense
+            // (same issue fixed in the Recent panel) - show the probed
+            // title if we have one, otherwise the whole URL.
+            let name = if let Some(m) = url_meta {
+                m.title.clone()
+            } else if is_url {
+                path_str.clone().into_owned()
+            } else {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone().into_owned())
+            };
             let display_name = trunc(&name, 30);
 
             let label_color = if is_current { AURORA_TEAL } else { TEXT_BRIGHT };
             let bg_color = if is_current { BG_BUTTON } else { BG_DEEPEST };
 
-            let meta = super::fmt_meta(path, &app.size_cache, &app.resume_db);
+            let meta = if let Some(m) = url_meta {
+                let dur = m.duration.map(|d| super::fmt_duration(d)).unwrap_or_default();
+                let parts: Vec<&str> = [dur.as_str(), m.uploader.as_deref().unwrap_or("")]
+                    .into_iter().filter(|s| !s.is_empty()).collect();
+                parts.join("  ")
+            } else if is_url {
+                String::new()
+            } else {
+                super::fmt_meta(path, &app.size_cache, &app.resume_db)
+            };
+
+            // Once we have a real title, the raw URL moves to its own
+            // muted line under it instead of a badge next to the title -
+            // it's still visible, just not competing with the title itself.
+            let url_line: Option<Element<'_, Message>> = if url_meta.is_some() {
+                Some(text(trunc(&path_str, 40)).size(9).color(TEXT_MUTED).into())
+            } else {
+                None
+            };
+
+            let mut title_col = column![
+                text(display_name).size(12).color(label_color),
+            ];
+            if let Some(url_line) = url_line {
+                title_col = title_col.push(url_line);
+            }
+            title_col = title_col.push(text(meta).size(10).color(TEXT_MUTED));
 
             let jump_btn = button(
                 row![
@@ -47,11 +84,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                         text(format!("{:>2}.", i + 1)).size(11).color(TEXT_MUTED),
                     )
                     .width(Length::Fixed(28.0)),
-                    column![
-                        text(display_name).size(12).color(label_color),
-                        text(meta).size(10).color(TEXT_MUTED),
-                    ]
-                    .spacing(1),
+                    title_col.spacing(1),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -309,6 +342,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 if app.playlist.len() == 1 { "" } else { "s" }))
                 .size(11).color(TEXT_MUTED),
             Space::new().width(Length::Fill),
+            small_btn("+URL", Message::OpenModal(crate::app::ModalKind::AddPlaylistUrl), AURORA_TEAL),
             small_btn("Load", Message::LoadPlaylist, AURORA_TEAL),
             small_btn("Save", Message::SavePlaylist, AURORA_GREEN),
             sort_btn,

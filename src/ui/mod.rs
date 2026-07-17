@@ -1,3 +1,4 @@
+pub mod app_settings;
 mod browser_panel;
 mod controls;
 mod edge_grips;
@@ -9,7 +10,7 @@ mod top_bar;
 pub mod video;
 
 use edge_grips::EdgeGrips;
-use crate::app::USE_CUSTOM_TITLE_BAR;
+use crate::app::use_custom_title_bar;
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::{
@@ -178,16 +179,53 @@ enum MenuRow {
     Header(&'static str, usize),
 }
 
+/// Everything `menu_rows` reads, copied out of `MpvNe` so the popup's
+/// content can be memoized via `iced::widget::lazy` - see settings.rs's
+/// `SettingsSnapshot` doc comment for the underlying reason (every video
+/// frame otherwise forced a full rebuild of this popup too, whenever it
+/// happened to be open, regardless of whether anything in it changed).
+#[derive(Debug, Clone, Hash)]
+struct MenuSnapshot {
+    has_media: bool,
+    private_mode: bool,
+    paused: bool,
+    muted: bool,
+    menu_section_open: [bool; 2],
+    fullscreen: bool,
+    chrome_force_hidden: bool,
+    pinned: bool,
+    pip_active: bool,
+}
+
+impl MenuSnapshot {
+    fn from_app(app: &MpvNe) -> Self {
+        Self {
+            has_media: app.player.path.is_some(),
+            private_mode: app.private_mode,
+            paused: app.player.paused,
+            muted: app.player.muted,
+            menu_section_open: app.menu_section_open,
+            fullscreen: app.fullscreen,
+            chrome_force_hidden: app.chrome_force_hidden,
+            pinned: app.pinned,
+            pip_active: app.pip_active,
+        }
+    }
+}
+
 /// Build the row list for the main-menu popup. Shared by `menu_window_view`
 /// (rendering) and `menu_window_height` (size estimation) so they can never
 /// disagree about what's visible.
-fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
+fn menu_rows(app: &MenuSnapshot) -> Vec<MenuRow> {
     use MenuRow::*;
-    let has_media = app.player.path.is_some();
+    let has_media = app.has_media;
     let mut rows = Vec::new();
 
     rows.push(Item("Open file(s)…", Message::VideoMenuAction(Box::new(Message::OpenFile))));
     rows.push(Item("Open URL / stream…", Message::VideoMenuAction(Box::new(Message::OpenUrl))));
+    rows.push(Item("Add URL to playlist…", Message::VideoMenuAction(Box::new(
+        Message::OpenModal(crate::app::ModalKind::AddPlaylistUrl)
+    ))));
     rows.push(Item("Playlist", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
     rows.push(Item("Browse files", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
     rows.push(Item("Recent", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
@@ -201,7 +239,7 @@ fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
     if has_media {
         rows.push(Header("Playback", 0));
         if app.menu_section_open[0] {
-            let play_label = if app.player.paused { "Play" } else { "Pause" };
+            let play_label = if app.paused { "Play" } else { "Pause" };
             rows.push(Item(play_label, Message::VideoMenuAction(Box::new(Message::TogglePause))));
             rows.push(Item("Previous file", Message::VideoMenuAction(Box::new(Message::PrevFile))));
             rows.push(Item("Next file", Message::VideoMenuAction(Box::new(Message::NextFile))));
@@ -217,7 +255,7 @@ fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
             rows.push(Item("Cycle fit / fill / stretch", Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
             rows.push(Item("Take screenshot", Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
             rows.push(Item("Cycle audio track", Message::VideoMenuAction(Box::new(Message::CycleAudio))));
-            let mute_label = if app.player.muted { "Unmute" } else { "Mute" };
+            let mute_label = if app.muted { "Unmute" } else { "Mute" };
             rows.push(Item(mute_label, Message::VideoMenuAction(Box::new(Message::ToggleMute))));
             rows.push(Item("Cycle subtitle track", Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
         }
@@ -232,7 +270,8 @@ fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
     rows.push(Item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
     let pip_label = if app.pip_active { "Exit Picture-in-Picture" } else { "Picture-in-Picture" };
     rows.push(Item(pip_label, Message::VideoMenuAction(Box::new(Message::TogglePip))));
-    rows.push(Item("Settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
+    rows.push(Item("Playback settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
+    rows.push(Item("Settings…", Message::VideoMenuAction(Box::new(Message::OpenAppSettings))));
     rows.push(Item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
     rows.push(Divider);
 
@@ -248,7 +287,7 @@ fn menu_rows(app: &MpvNe) -> Vec<MenuRow> {
 /// size the popup OS window (iced can't report actual rendered height from
 /// outside the render pass).
 pub fn menu_window_height(app: &MpvNe) -> f32 {
-    let rows = menu_rows(app);
+    let rows = menu_rows(&MenuSnapshot::from_app(app));
     let n = rows.len();
     let mut h: f32 = 2.0; // border
     if n > 1 { h += (n - 1) as f32; } // 1px column spacing between rows
@@ -272,25 +311,29 @@ pub fn menu_window_height(app: &MpvNe) -> f32 {
 /// backdrop widget here — every pixel of the window IS the menu, and it
 /// closes via a menu action, Escape, or losing OS focus.
 pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
-    use iced::widget::Column;
-    let items: Vec<Element<'_, Message>> = menu_rows(app)
-        .into_iter()
-        .map(|row| match row {
-            MenuRow::Item(label, msg) => ctx_menu_item(label, msg),
-            MenuRow::Divider => ctx_menu_divider(),
-            MenuRow::Header(label, idx) => ctx_menu_header(label, idx, app.menu_section_open[idx]),
-        })
-        .collect();
+    let snapshot = MenuSnapshot::from_app(app);
+    iced::widget::lazy(snapshot, |snap| -> Element<'static, Message> {
+        use iced::widget::Column;
+        let items: Vec<Element<'static, Message>> = menu_rows(snap)
+            .into_iter()
+            .map(|row| match row {
+                MenuRow::Item(label, msg) => ctx_menu_item(label, msg),
+                MenuRow::Divider => ctx_menu_divider(),
+                MenuRow::Header(label, idx) => ctx_menu_header(label, idx, snap.menu_section_open[idx]),
+            })
+            .collect();
 
-    container(
-        Column::with_children(items).spacing(1).width(Length::Fill),
-    )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_DEEPEST)),
-        border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
-        ..Default::default()
+        container(
+            Column::with_children(items).spacing(1).width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(BG_DEEPEST)),
+            border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+            ..Default::default()
+        })
+        .into()
     })
     .into()
 }
@@ -309,7 +352,7 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
             ..Default::default()
         });
 
-    let inner: Element<'_, Message> = if crate::app::USE_CUSTOM_TITLE_BAR {
+    let inner: Element<'_, Message> = if crate::app::use_custom_title_bar() {
         column![panel_title_bar(app), body].width(Length::Fill).height(Length::Fill).into()
     } else {
         body.into()
@@ -326,7 +369,7 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
     // Resize-cursor feedback, same as the main window's - it has no OS
     // decorations either (custom chrome), so no OS-drawn resize handles.
     EdgeGrips::new(outer)
-        .enabled(crate::app::USE_CUSTOM_TITLE_BAR)
+        .enabled(crate::app::use_custom_title_bar())
         .into()
 }
 
@@ -395,7 +438,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         ("Playlist", PanelKind::Playlist),
         ("Browser",  PanelKind::Browser),
         ("Recent",   PanelKind::Recent),
-        ("Settings", PanelKind::Settings),
+        ("Playback", PanelKind::Settings),
     ];
 
     // Tab bar row.
@@ -884,15 +927,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let with_panels_popup: Element<'_, Message> = with_ctx_menu;
 
     let with_modal: Element<'_, Message> = if let Some(modal) = &app.modal {
-        let dialog = container(
-            column![
-                text(modal.title).size(14).color(TEXT_BRIGHT),
-                text(modal.prompt).size(11).color(TEXT_MUTED),
-                iced::widget::text_input("", &modal.input)
-                    .on_input(Message::ModalInput)
-                    .on_submit(Message::ModalConfirm)
-                    .padding([8, 10])
-                    .size(13)
+        let input = mouse_area(
+            iced::widget::text_input("", &modal.input)
+                .on_input(Message::ModalInput)
+                .on_submit(Message::ModalConfirm)
+                .padding([8, 10])
+                .size(13)
                     .style(|_, status| {
                         use iced::widget::text_input::Status;
                         iced::widget::text_input::Style {
@@ -911,6 +951,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                             selection: Color { a: 0.3, ..AURORA_TEAL },
                         }
                     }),
+        )
+        .on_right_press(Message::ModalPasteRequest);
+
+        let dialog = container(
+            column![
+                text(modal.title).size(14).color(TEXT_BRIGHT),
+                text(modal.prompt).size(11).color(TEXT_MUTED),
+                input,
                 row![
                     Space::new().width(Length::Fill),
                     button(text("Cancel").size(12).color(TEXT_MUTED))
@@ -1186,6 +1234,6 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Resize-cursor feedback only matters when we own the chrome (custom
     // title bar on) and aren't in fullscreen.
     EdgeGrips::new(with_help)
-        .enabled(USE_CUSTOM_TITLE_BAR && !app.fullscreen)
+        .enabled(use_custom_title_bar() && !app.fullscreen)
         .into()
 }

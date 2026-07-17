@@ -220,11 +220,33 @@ pub struct Player {
     pub saturation: i64,
     pub hue: i64,
     pub gamma: i64,
+    /// Per-band gain in dB, one entry per `EQ_BANDS` - our own graphic
+    /// equalizer twist on PotPlayer's Control Panel, applied via chained
+    /// ffmpeg `equalizer` filters (see `rebuild_eq_af`) rather than mpv's
+    /// biquad chain, since each band needs independent runtime control.
+    pub eq_gains: Vec<f64>,
+    pub eq_enabled: bool,
     /// Our active labeled filters. Rebuilt and set atomically to avoid flicker.
     vf_slots: std::collections::HashMap<&'static str, String>,
     /// Same idea as `vf_slots` but for the audio filter chain.
     af_slots: std::collections::HashMap<&'static str, String>,
 }
+
+/// (display label, center frequency in Hz) for each equalizer band - the
+/// standard 10-band ISO graphic-EQ frequency set, rather than copying
+/// PotPlayer's slightly uneven list (60/170/310/600/1K/3K/6K/12K/14K/16K).
+pub const EQ_BANDS: &[(&str, f64)] = &[
+    ("31", 31.0),
+    ("62", 62.0),
+    ("125", 125.0),
+    ("250", 250.0),
+    ("500", 500.0),
+    ("1K", 1000.0),
+    ("2K", 2000.0),
+    ("4K", 4000.0),
+    ("8K", 8000.0),
+    ("16K", 16000.0),
+];
 
 impl Player {
     pub fn new() -> Self {
@@ -353,6 +375,8 @@ impl Player {
                 video_zoom: 0.0,
                 cache_time: 0.0,
                 vf_slots: std::collections::HashMap::new(),
+                eq_gains: vec![0.0; EQ_BANDS.len()],
+                eq_enabled: false,
                 af_slots: std::collections::HashMap::new(),
             }
         }
@@ -380,9 +404,17 @@ impl Player {
     pub fn open(&mut self, path: impl Into<String>) {
         let path = path.into();
         self.path = Some(path.clone());
-        self.paused = false;
         self.vf_slots.clear(); // filters are reset by mpv on file load
         command(self.handle.0, &["loadfile", &path]);
+        // `set_pause(false)` (not just `self.paused = false`) - mpv's own
+        // `pause` property can still be `yes` from the previous file hitting
+        // EOF under keep-open=yes. Setting only our tracked flag left mpv
+        // itself still paused, so the new file loaded but never rendered a
+        // frame until the user happened to toggle pause twice (the second
+        // toggle being the first time "pause no" was actually ever sent).
+        // Most visible switching between playlist URLs, which hit that
+        // keep-open pause far more often than local files do.
+        self.set_pause(false);
     }
 
     pub fn play(&mut self) {
@@ -538,6 +570,39 @@ impl Player {
         self.set_af_slot("normalize", on.then_some("@mpvne_norm:lavfi=[dynaudnorm]".into()));
     }
 
+    /// Set one equalizer band's gain (dB, clamped to +/-12) and reapply the
+    /// filter chain if the equalizer is currently on.
+    pub fn set_eq_band(&mut self, band: usize, gain_db: f64) {
+        let Some(slot) = self.eq_gains.get_mut(band) else { return };
+        *slot = gain_db.clamp(-12.0, 12.0);
+        self.rebuild_eq_af();
+    }
+
+    pub fn set_eq_enabled(&mut self, on: bool) {
+        self.eq_enabled = on;
+        self.rebuild_eq_af();
+    }
+
+    pub fn reset_eq(&mut self) {
+        self.eq_gains.iter_mut().for_each(|g| *g = 0.0);
+        self.rebuild_eq_af();
+    }
+
+    /// Rebuild the "eq" audio filter slot from `eq_gains` - one chained
+    /// ffmpeg `equalizer` filter per band, each independently controlling
+    /// its own center frequency, letting every band be adjusted at runtime
+    /// without rebuilding mpv's whole filter graph from scratch by hand.
+    fn rebuild_eq_af(&mut self) {
+        if !self.eq_enabled {
+            self.set_af_slot("eq", None);
+            return;
+        }
+        let chain: Vec<String> = EQ_BANDS.iter().zip(self.eq_gains.iter())
+            .map(|((_, freq), gain)| format!("equalizer=f={freq}:width_type=q:width=1.0:g={gain}"))
+            .collect();
+        self.set_af_slot("eq", Some(format!("@mpvne_eq:lavfi=[{}]", chain.join(","))));
+    }
+
     /// Preferred track languages (ISO 639 codes, e.g. "eng", comma-separated
     /// for multiple in priority order). Only influences which track mpv
     /// auto-selects - it takes effect at file load, not retroactively on
@@ -636,9 +701,11 @@ impl Player {
         // produced real frames the whole time) and always fall back to the
         // idle placeholder icon instead.
         self.path = Some(url.to_string());
-        self.paused = false;
         self.vf_slots.clear();
         command(self.handle.0, &["loadfile", url]);
+        // See `open()`'s doc comment - mpv's own `pause` property, not just
+        // our tracked flag, needs to be explicitly cleared.
+        self.set_pause(false);
     }
 
     pub fn add_sub_file(&self, path: &str) {
@@ -808,6 +875,23 @@ pub fn event_stream(key: &StreamKey) -> BoxStream<'static, PlayerEvent> {
 // ── mpv event loop ───────────────────────────────────────────────────────────
 
 fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
+    // mpv fires time-pos changes far more often than the UI needs (up to
+    // once per video frame) - every one triggers a full iced view() rebuild
+    // of the *entire* app, panels included, which got noticeably heavy once
+    // the settings panel grew this session (10-band EQ, keybind list, all
+    // the new Interface toggles). Throttling to 10/sec is still a smooth
+    // seekbar/time display and cuts rebuild frequency by up to 5-6x during
+    // normal playback, which is where the stutter (especially while
+    // scrolling the settings panel at the same time) was coming from.
+    let mut last_pos_sent = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    const POS_THROTTLE: std::time::Duration = std::time::Duration::from_millis(100);
+    // demuxer-cache-time updates continuously while a network stream is
+    // buffering (far more often than time-pos does even) - same throttling
+    // reasoning applies, and this was likely the bigger contributor to
+    // stutter specifically during URL/stream playback vs. local files.
+    let mut last_cache_sent = last_pos_sent;
     loop {
         let ev = unsafe { &*sys::mpv_wait_event(handle.0, -1.0) };
         match ev.event_id {
@@ -852,7 +936,11 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                 match (name, prop.format) {
                     ("time-pos", sys::mpv_format_MPV_FORMAT_DOUBLE) => {
                         let pos = unsafe { *(prop.data as *const f64) };
-                        let _ = tx.send(PlayerEvent::Position(pos));
+                        let now = std::time::Instant::now();
+                        if now.duration_since(last_pos_sent) >= POS_THROTTLE {
+                            last_pos_sent = now;
+                            let _ = tx.send(PlayerEvent::Position(pos));
+                        }
                     }
                     ("duration", sys::mpv_format_MPV_FORMAT_DOUBLE) => {
                         let dur = unsafe { *(prop.data as *const f64) };
@@ -953,7 +1041,11 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                     }
                     ("demuxer-cache-time", sys::mpv_format_MPV_FORMAT_DOUBLE) => {
                         let v = unsafe { *(prop.data as *const f64) };
-                        let _ = tx.send(PlayerEvent::CacheTime(v));
+                        let now = std::time::Instant::now();
+                        if now.duration_since(last_cache_sent) >= POS_THROTTLE {
+                            last_cache_sent = now;
+                            let _ = tx.send(PlayerEvent::CacheTime(v));
+                        }
                     }
                     ("deinterlace", sys::mpv_format_MPV_FORMAT_FLAG) => {
                         let v = unsafe { *(prop.data as *const std::os::raw::c_int) };
@@ -1011,6 +1103,20 @@ fn init_and_render_loop(
 
     let mut last_w: u32 = 0;
     let mut last_h: u32 = 0;
+    // Every decoded frame sent to the UI triggers a full iced view() rebuild
+    // of the entire app (settings panel/menu included, whether visible or
+    // not) - at 60fps source content that's 60 full-tree rebuilds/sec as a
+    // baseline, independent of anything else happening (cursor moves, etc).
+    // Capping how often we actually forward a frame to ~30/sec cuts that in
+    // half for 60fps content while staying smooth for the far more common
+    // 24-30fps case. mpv still renders every frame underneath (needed to
+    // keep its internal timing/frame-drop accounting correct) - only the
+    // send-to-UI step is throttled, so this doesn't affect actual playback
+    // speed/audio sync, just how often the picture visibly updates.
+    let mut last_frame_sent = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or_else(std::time::Instant::now);
+    const FRAME_THROTTLE: std::time::Duration = std::time::Duration::from_millis(33);
 
     loop {
         // Wait for either mpv (new frame) or set_render_size (resize) to signal.
@@ -1061,8 +1167,15 @@ fn init_and_render_loop(
 
         let rc = unsafe { sys::mpv_render_context_render(ctx, rp.as_mut_ptr()) };
         if rc == 0 {
-            if tx.send(PlayerEvent::Frame(buf, w, h)).is_err() {
-                break;
+            let now = std::time::Instant::now();
+            // Always forward immediately on a resize (or the first frame at
+            // a new size) - throttling that would make resizing feel laggy.
+            let should_send = size_changed || now.duration_since(last_frame_sent) >= FRAME_THROTTLE;
+            if should_send {
+                last_frame_sent = now;
+                if tx.send(PlayerEvent::Frame(buf, w, h)).is_err() {
+                    break;
+                }
             }
         } else {
             tracing::warn!(rc, "mpv_render_context_render failed");

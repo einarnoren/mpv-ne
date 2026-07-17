@@ -1,10 +1,10 @@
 [package]
 name = "mpv-ne"
-version = "0.3.5"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
-iced = { version = "0.14", features = ["wgpu", "image", "advanced", "tokio", "svg"] }
+iced = { version = "0.14", features = ["wgpu", "image", "advanced", "tokio", "svg", "lazy"] }
 libmpv-sys = "3"
 raw-window-handle = "0.6"
 tokio = { version = "1", features = ["full"] }

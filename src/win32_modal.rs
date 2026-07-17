@@ -63,6 +63,115 @@ unsafe extern "system" {
     fn GetCursorPos(pt: *mut POINT) -> i32;
     fn GetClassNameW(hwnd: HWND, buf: *mut u16, max_count: i32) -> i32;
     fn GetWindowRect(hwnd: HWND, rect: *mut RECT) -> i32;
+    fn IsIconic(hwnd: HWND) -> i32;
+    fn GetWindowTextW(hwnd: HWND, buf: *mut u16, max_count: i32) -> i32;
+    fn SendMessageW(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize;
+    fn SetForegroundWindow(hwnd: HWND) -> i32;
+    fn ShowWindow(hwnd: HWND, cmd: i32) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CreateMutexW(attrs: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+    fn GetLastError() -> u32;
+}
+
+const ERROR_ALREADY_EXISTS: u32 = 183;
+const WM_COPYDATA: u32 = 0x004A;
+const SW_RESTORE: i32 = 9;
+
+#[repr(C)]
+struct CopyDataStruct {
+    dw_data: usize,
+    cb_data: u32,
+    lp_data: *const std::ffi::c_void,
+}
+
+/// A file path forwarded from a newer launch via `send_open_file_to`,
+/// picked up by a polling subscription in app.rs (`Message::PollSingleInstance`)
+/// - see `take_pending_open_file`.
+static PENDING_OPEN_FILE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Holds the single-instance mutex handle for the process's lifetime once
+/// claimed - never explicitly closed; the OS releases it on process exit.
+static SINGLE_INSTANCE_MUTEX: AtomicIsize = AtomicIsize::new(0);
+
+fn get_window_text(hwnd: HWND) -> Option<String> {
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 0 { return None; }
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+unsafe extern "system" fn enum_other_instance_cb(hwnd: HWND, _: isize) -> i32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid == unsafe { GetCurrentProcessId() } { return 1; }
+    if unsafe { IsWindowVisible(hwnd) } == 0 { return 1; }
+    if unsafe { GetWindow(hwnd, GW_OWNER) } != 0 { return 1; }
+    let Some(title) = get_window_text(hwnd) else { return 1; };
+    // Main window titles always contain "MPV-NE" (see `title_str`) - the
+    // detached panel/Settings windows have fixed " - Panel"/" - Settings"
+    // titles we need to exclude so we hand off to the actual player window.
+    let is_main = title.contains("MPV-NE")
+        && !title.contains(" - Panel")
+        && !title.contains(" - Settings");
+    if !is_main { return 1; }
+    FOUND_HWND.store(hwnd, Ordering::SeqCst);
+    0
+}
+
+/// Claim the single-instance mutex. Returns `Some(hwnd)` of the other
+/// instance's main window if one is already running (the caller should hand
+/// off to it and exit without creating any windows of its own), or `None`
+/// if this process successfully became the primary instance.
+pub fn try_claim_single_instance() -> Option<isize> {
+    let name: Vec<u16> = "Local\\MPVNE_SingleInstanceMutex\0".encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+    let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+    if !already_running {
+        // Keep the handle open for the rest of the process's life - this is
+        // what makes the mutex still be "held" for the next launch to see.
+        SINGLE_INSTANCE_MUTEX.store(handle, Ordering::SeqCst);
+        return None;
+    }
+    FOUND_HWND.store(0, Ordering::SeqCst);
+    unsafe { EnumWindows(enum_other_instance_cb, 0) };
+    let hwnd = FOUND_HWND.load(Ordering::SeqCst);
+    if hwnd != 0 { Some(hwnd) } else { None }
+}
+
+/// Forward a file path to an already-running instance's main window (found
+/// via `try_claim_single_instance`) and bring it to the foreground.
+pub fn send_open_file_to(hwnd: isize, path: &str) {
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let cds = CopyDataStruct {
+        dw_data: 0,
+        cb_data: (wide.len() * 2) as u32,
+        lp_data: wide.as_ptr() as *const _,
+    };
+    unsafe {
+        SendMessageW(hwnd, WM_COPYDATA, 0, &cds as *const _ as isize);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// Drain the last file path forwarded from another launch, if any - polled
+/// from app.rs's subscription (only while single-instance mode is on).
+pub fn take_pending_open_file() -> Option<String> {
+    PENDING_OPEN_FILE.lock().ok()?.take()
+}
+
+/// True while the main window is minimized. Used to drive "hide all windows
+/// when minimized" and "pause when minimized" - both poll this rather than
+/// hooking WM_SIZE, since neither needs sub-frame latency.
+pub fn is_main_window_minimized() -> bool {
+    let hwnd = OWN_HWND.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return false;
+    }
+    unsafe { IsIconic(hwnd) != 0 }
 }
 
 const GW_OWNER:                u32 = 4;
@@ -86,6 +195,15 @@ const SNAP_OUT_PX: i32 = 22;
 // ---------------------------------------------------------------------------
 
 static FOUND_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Runtime on/off switch for window-to-window/edge snapping, set from the
+/// Settings window (Interface tab). Checked at the top of the WM_MOVING
+/// handler - default on, matching existing behavior.
+static SNAP_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_snap_enabled(on: bool) {
+    SNAP_ENABLED.store(on, Ordering::Relaxed);
+}
 
 /// Per-edge snap state: stores the cursor position (x,y) at snap time packed
 /// into an i64 (high 32 = x, low 32 = y), or i64::MIN when not snapped.
@@ -200,6 +318,26 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, _: isize) -> i32 {
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize {
     match msg {
+        WM_COPYDATA => {
+            // A newer launch forwarded a file path to us via
+            // `send_open_file_to` (single-instance mode) - decode the
+            // UTF-16 payload and stash it for the polling subscription to
+            // pick up (see `take_pending_open_file`).
+            if l != 0 {
+                let cds = unsafe { &*(l as *const CopyDataStruct) };
+                if !cds.lp_data.is_null() && cds.cb_data > 0 {
+                    let len = cds.cb_data as usize / 2;
+                    let slice = unsafe { std::slice::from_raw_parts(cds.lp_data as *const u16, len) };
+                    // Trim the trailing NUL terminator we sent.
+                    let end = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
+                    let path = String::from_utf16_lossy(&slice[..end]);
+                    if let Ok(mut guard) = PENDING_OPEN_FILE.lock() {
+                        *guard = Some(path);
+                    }
+                }
+            }
+            return 1;
+        }
         WM_ENTERMENULOOP => {
             // Pause mpv during native menu loops - they block iced's event loop
             // completely so frames can't be presented anyway.
@@ -230,6 +368,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> 
             GUARD_B.store(0, Ordering::Relaxed);
         }
         WM_MOVING => {
+            if !SNAP_ENABLED.load(Ordering::Relaxed) {
+                let orig = ORIG_WNDPROC.load(Ordering::SeqCst);
+                return unsafe { CallWindowProcW(orig, hwnd, msg, w, l) };
+            }
             let r = unsafe { &mut *(l as *mut RECT) };
             let width  = r.right  - r.left;
             let height = r.bottom - r.top;
