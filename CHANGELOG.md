@@ -6,6 +6,62 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.5] — 2026-07-18
+
+Windows shell integration (system tray, taskbar thumbnail buttons, media
+transport controls), input rebinding for the mouse, and a batch of playback
+quality-of-life features - plus a real fix for a startup rendering bug on
+scaled displays.
+
+### Windows shell integration
+- **Minimize to system tray** - minimizing hides the window to a tray icon
+  instead of the taskbar; left/double-click restores, right-click gives a
+  Restore/Exit menu.
+- **Taskbar thumbnail buttons** - Previous/Play-Pause/Next controls on the
+  taskbar preview thumbnail.
+- **System Media Transport Controls (SMTC)** - lock screen, volume flyout,
+  and hardware media-key integration, with the current file's name shown
+  as the now-playing title. Works even when the app isn't focused.
+- **File associations** - register MPV-NE as an "Open with" option for
+  supported media extensions (opens Windows' own Default Apps picker,
+  since Windows blocks silently forcing a default).
+- Command-line/double-click file opening now actually works at normal
+  startup, not just via single-instance handoff.
+
+### Input
+- **Mouse binding remapping** - single-click, double-click, scroll-up, and
+  scroll-down on the video area are each independently rebindable to any
+  action, mirroring the existing keyboard remapping.
+- Right-click paste in text fields is now an explicit small context menu
+  instead of a silent paste, so it's discoverable.
+
+### Playback
+- **Frame-by-frame stepping** and **configurable seek-step size** (both
+  the Left/Right keys and the transport skip buttons share one adjustable
+  step).
+- **Speed step customisation** - the increment used by the speed up/down
+  keys and nudge buttons is now adjustable, same pattern as the seek step.
+- **Secondary subtitle track** - show a second subtitle track (e.g. a
+  second language) alongside the primary one.
+- **Jump to next/previous subtitle** - seek directly to the next or
+  previous subtitle line's timestamp (mpv's `sub-seek`).
+- **Pan and scan** - when zoomed in, click-drag the video to pan around
+  instead of moving the window.
+- Playlist: add URLs directly, with background metadata resolution
+  (title/duration/uploader); `.pls` playlist import alongside the
+  existing `.m3u`/`.m3u8` support.
+- Bookmark markers on the seek bar, alongside the existing chapter marks.
+
+### Fixes
+- **Startup rendering bug**: on a scaled display (125%/150%/etc.), the
+  window used to open assuming 100% DPI scale and get corrected
+  asynchronously afterward, leaving a brief window where the controls bar
+  laid out at the wrong size and looked visibly broken until something
+  forced a fresh layout (e.g. a manual resize). Fixed by querying the
+  target monitor's real DPI scale before the window is created.
+
+---
+
 ## [0.4.0] — 2026-07-16
 
 The settings rework release - a new standalone Settings window, persisted

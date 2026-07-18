@@ -41,6 +41,8 @@ struct SettingsSnapshot {
     loop_playlist: bool,
     deinterlace: bool,
     precise_seek: bool,
+    seek_step_secs: f64,
+    speed_step: f64,
     stream_quality_height: u32,
 
     audio_tracks: Vec<AudioTrack>,
@@ -54,6 +56,7 @@ struct SettingsSnapshot {
 
     sub_tracks: Vec<SubTrack>,
     current_sid: i64,
+    current_secondary_sid: i64,
     sub_delay: f64,
     sub_font_size: i64,
     sub_pos: i64,
@@ -89,6 +92,8 @@ impl SettingsSnapshot {
             loop_playlist: p.loop_playlist,
             deinterlace: p.deinterlace,
             precise_seek: app.precise_seek,
+            seek_step_secs: app.seek_step_secs,
+            speed_step: app.speed_step,
             stream_quality_height: app.stream_quality_height,
 
             audio_tracks: p.audio_tracks.clone(),
@@ -102,6 +107,7 @@ impl SettingsSnapshot {
 
             sub_tracks: p.sub_tracks.clone(),
             current_sid: p.current_sid,
+            current_secondary_sid: p.current_secondary_sid,
             sub_delay: p.sub_delay,
             sub_font_size: p.sub_font_size,
             sub_pos: p.sub_pos,
@@ -147,6 +153,8 @@ impl std::hash::Hash for SettingsSnapshot {
         self.loop_playlist.hash(state);
         self.deinterlace.hash(state);
         self.precise_seek.hash(state);
+        hash_f64(self.seek_step_secs, state);
+        hash_f64(self.speed_step, state);
         self.stream_quality_height.hash(state);
 
         self.audio_tracks.hash(state);
@@ -160,6 +168,7 @@ impl std::hash::Hash for SettingsSnapshot {
 
         self.sub_tracks.hash(state);
         self.current_sid.hash(state);
+        self.current_secondary_sid.hash(state);
         hash_f64(self.sub_delay, state);
         self.sub_font_size.hash(state);
         self.sub_pos.hash(state);
@@ -232,14 +241,27 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         gap(),
         section("Options", options_row(app)),
         gap(),
-        section("Seeking", row![
-            toggle_btn(
-                if app.precise_seek { "Precise (exact)" } else { "Fast (keyframe)" },
-                app.precise_seek,
-                Message::TogglePreciseSeek,
-                AURORA_TEAL,
-            ),
-        ].into()),
+        section("Seeking", column![
+            row![
+                toggle_btn(
+                    if app.precise_seek { "Precise (exact)" } else { "Fast (keyframe)" },
+                    app.precise_seek,
+                    Message::TogglePreciseSeek,
+                    AURORA_TEAL,
+                ),
+            ],
+            row![
+                text("Step").size(11).color(TEXT_MUTED),
+                Space::new().width(Length::Fixed(6.0)),
+                nudge_btn("-1s", Message::SeekStepAdjust(-1.0)),
+                value_label(format!("{:.0}s", app.seek_step_secs)),
+                nudge_btn("+1s", Message::SeekStepAdjust(1.0)),
+                Space::new().width(Length::Fill),
+                reset_btn(Message::SeekStepSet(5.0)),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        ].spacing(8).into()),
         gap(),
         section_sub(
             "Stream quality",
@@ -294,6 +316,12 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         // ── Subtitles ─────────────────────────────────────────────
         category("Subtitles"),
         section("Track", sub_track_list(app)),
+        gap(),
+        section_sub(
+            "Secondary track",
+            "Show a second subtitle track at the same time (e.g. a second language)",
+            secondary_sub_track_list(app),
+        ),
         gap(),
         section_sub("Subtitle sync", "Shift subtitles earlier/later, relative to audio", delay_row(
             app.sub_delay,
@@ -351,7 +379,7 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         gap(),
         section("Aspect ratio", aspect_row()),
         gap(),
-        section("Zoom", zoom_row(app)),
+        section_sub("Zoom", "When zoomed in, click-drag the video to pan around", zoom_row(app)),
         gap(),
         section("Rotate / flip", transform_row(app)),
         gap(),
@@ -403,9 +431,20 @@ fn speed_row(app: &SettingsSnapshot) -> Element<'static, Message> {
         row![
             value_label(label),
             Space::new().width(Length::Fill),
-            nudge_btn("-0.1", Message::SpeedAdjust(-0.1)),
-            nudge_btn("+0.1", Message::SpeedAdjust(0.1)),
+            nudge_btn(format!("-{:.2}", app.speed_step), Message::SpeedAdjust(-app.speed_step)),
+            nudge_btn(format!("+{:.2}", app.speed_step), Message::SpeedAdjust(app.speed_step)),
             reset_btn(Message::SpeedReset),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+        row![
+            text("Step").size(11).color(TEXT_MUTED),
+            Space::new().width(Length::Fixed(6.0)),
+            nudge_btn("-0.05", Message::SpeedStepAdjust(-0.05)),
+            value_label(format!("{:.2}", app.speed_step)),
+            nudge_btn("+0.05", Message::SpeedStepAdjust(0.05)),
+            Space::new().width(Length::Fill),
+            reset_btn(Message::SpeedStepSet(0.1)),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -978,10 +1017,32 @@ fn sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
     if app.sub_tracks.is_empty() {
         return text("No subtitle tracks").size(11).color(TEXT_MUTED).into();
     }
-    let rows = app.sub_tracks.iter().map(|t| {
-        track_btn(t.label.clone(), t.id == app.current_sid, Message::SubTrackSelected(t.clone()), AURORA_TEAL)
-    });
-    column(rows).spacing(4).into()
+    let current = app.sub_tracks.iter().find(|t| t.id == app.current_sid).cloned();
+    iced::widget::pick_list(
+        app.sub_tracks.clone(),
+        current,
+        Message::SubTrackSelected,
+    )
+    .text_size(12)
+    .padding([5, 10])
+    .width(Length::Fill)
+    .into()
+}
+
+fn secondary_sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
+    if app.sub_tracks.is_empty() {
+        return text("No subtitle tracks").size(11).color(TEXT_MUTED).into();
+    }
+    let current = app.sub_tracks.iter().find(|t| t.id == app.current_secondary_sid).cloned();
+    iced::widget::pick_list(
+        app.sub_tracks.clone(),
+        current,
+        Message::SecondarySubTrackSelected,
+    )
+    .text_size(12)
+    .padding([5, 10])
+    .width(Length::Fill)
+    .into()
 }
 
 /// Small text field for a 3-letter-ish language code (e.g. "eng"), used for
@@ -1091,8 +1152,8 @@ fn gap() -> Element<'static, Message> {
     Space::new().height(Length::Fixed(2.0)).width(Length::Fill).into()
 }
 
-fn nudge_btn(label: &'static str, msg: Message) -> Element<'static, Message> {
-    button(text(label).size(11).color(TEXT_BRIGHT))
+fn nudge_btn(label: impl ToString, msg: Message) -> Element<'static, Message> {
+    button(text(label.to_string()).size(11).color(TEXT_BRIGHT))
         .padding([4, 7])
         .style(|_, status| {
             use iced::widget::button::Status;

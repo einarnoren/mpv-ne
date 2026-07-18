@@ -15,7 +15,7 @@
 #![cfg(target_os = "windows")]
 
 use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 type Callback = Box<dyn Fn() + Send + Sync>;
@@ -68,17 +68,788 @@ unsafe extern "system" {
     fn SendMessageW(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize;
     fn SetForegroundWindow(hwnd: HWND) -> i32;
     fn ShowWindow(hwnd: HWND, cmd: i32) -> i32;
+    fn LoadIconW(hinstance: isize, name: isize) -> isize;
+    fn CreatePopupMenu() -> isize;
+    fn AppendMenuW(menu: isize, flags: u32, id_new_item: usize, item: *const u16) -> i32;
+    fn DestroyMenu(menu: isize) -> i32;
+    fn TrackPopupMenuEx(menu: isize, flags: u32, x: i32, y: i32, hwnd: HWND, params: *const std::ffi::c_void) -> i32;
+    fn PostMessageW(hwnd: HWND, msg: u32, w: usize, l: isize) -> i32;
+    fn GetModuleHandleW(name: *const u16) -> isize;
+    fn GetDC(hwnd: HWND) -> isize;
+    fn ReleaseDC(hwnd: HWND, hdc: isize) -> i32;
+    fn RegisterWindowMessageW(name: *const u16) -> u32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn Shell_NotifyIconW(dw_message: u32, data: *mut NotifyIconDataW) -> i32;
+    fn ExtractIconW(hinst: isize, exe_file_name: *const u16, icon_index: u32) -> isize;
 }
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn CreateMutexW(attrs: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
     fn GetLastError() -> u32;
+    fn GetModuleFileNameW(hmodule: isize, buf: *mut u16, size: u32) -> u32;
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn RegCreateKeyExW(
+        hkey: isize, subkey: *const u16, reserved: u32, class: *const u16,
+        options: u32, sam: u32, sec_attrs: *const std::ffi::c_void,
+        result: *mut isize, disposition: *mut u32,
+    ) -> i32;
+    fn RegSetValueExW(hkey: isize, value_name: *const u16, reserved: u32, dtype: u32, data: *const u8, cb_data: u32) -> i32;
+    fn RegCloseKey(hkey: isize) -> i32;
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn ShellExecuteW(hwnd: isize, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> isize;
 }
 
 const ERROR_ALREADY_EXISTS: u32 = 183;
 const WM_COPYDATA: u32 = 0x004A;
 const SW_RESTORE: i32 = 9;
+const SW_HIDE: i32 = 0;
+
+// ---------------------------------------------------------------------------
+// System tray icon (minimize-to-tray)
+// ---------------------------------------------------------------------------
+
+const WM_TRAYICON: u32 = 0x8000 + 1; // WM_APP + 1
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
+const WM_RBUTTONUP: u32 = 0x0205;
+const NIM_ADD: u32 = 0;
+const NIM_DELETE: u32 = 2;
+const NIF_MESSAGE: u32 = 0x1;
+const NIF_ICON: u32 = 0x2;
+const NIF_TIP: u32 = 0x4;
+const MF_STRING: u32 = 0x0;
+const TPM_RIGHTALIGN: u32 = 0x8;
+const TPM_BOTTOMALIGN: u32 = 0x20;
+const TPM_RETURNCMD: u32 = 0x100;
+const ID_TRAY_RESTORE: usize = 1;
+const ID_TRAY_EXIT: usize = 2;
+
+/// Layout matches the Windows SDK's `NOTIFYICONDATAW` (post-XP SP2, the
+/// version every shell32 shipped since Vista supports). `hwnd`/`hIcon` are
+/// pointer-sized so this only needs to be right on 64-bit, which is all we
+/// ship for.
+#[repr(C)]
+struct NotifyIconDataW {
+    cb_size: u32,
+    hwnd: HWND,
+    u_id: u32,
+    u_flags: u32,
+    u_callback_message: u32,
+    h_icon: isize,
+    sz_tip: [u16; 128],
+    dw_state: u32,
+    dw_state_mask: u32,
+    sz_info: [u16; 256],
+    u_timeout_or_version: u32,
+    sz_info_title: [u16; 64],
+    dw_info_flags: u32,
+    guid_item: [u8; 16],
+    h_balloon_icon: isize,
+}
+
+static TRAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static ON_TRAY_RESTORE: OnceLock<Callback> = OnceLock::new();
+static ON_TRAY_EXIT: OnceLock<Callback> = OnceLock::new();
+
+fn app_icon() -> isize {
+    // Pull icon 0 out of our own exe (embedded by winres via assets/icon.ico
+    // at build time) rather than shipping/loading a separate resource.
+    let mut path_buf = [0u16; 1024];
+    let hinst = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let len = unsafe { GetModuleFileNameW(hinst, path_buf.as_mut_ptr(), path_buf.len() as u32) };
+    if len > 0 {
+        let icon = unsafe { ExtractIconW(hinst, path_buf.as_ptr(), 0) };
+        if icon > 1 { return icon; } // 0/1 mean "no icon"/"file has no icons"
+    }
+    const IDI_APPLICATION: isize = 32512;
+    unsafe { LoadIconW(0, IDI_APPLICATION) }
+}
+
+fn tray_hwnd() -> HWND {
+    OWN_HWND.load(Ordering::Relaxed)
+}
+
+fn make_nid() -> NotifyIconDataW {
+    let mut tip = [0u16; 128];
+    for (i, c) in "MPV-NE".encode_utf16().enumerate().take(127) {
+        tip[i] = c;
+    }
+    NotifyIconDataW {
+        cb_size: std::mem::size_of::<NotifyIconDataW>() as u32,
+        hwnd: tray_hwnd(),
+        u_id: 1,
+        u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        u_callback_message: WM_TRAYICON,
+        h_icon: app_icon(),
+        sz_tip: tip,
+        dw_state: 0,
+        dw_state_mask: 0,
+        sz_info: [0; 256],
+        u_timeout_or_version: 0,
+        sz_info_title: [0; 64],
+        dw_info_flags: 0,
+        guid_item: [0; 16],
+        h_balloon_icon: 0,
+    }
+}
+
+const WM_CLOSE: u32 = 0x0010;
+
+/// One-time setup for the tray icon's click/menu behavior: left-click or
+/// double-click restores the window; the context menu's "Exit" posts a
+/// normal WM_CLOSE, so it runs through the exact same close/save/shutdown
+/// path as clicking the window's own X button. Separate from `install()`
+/// since tray support is optional (only relevant while "minimize to tray"
+/// is enabled).
+pub fn install_tray() {
+    let _ = ON_TRAY_RESTORE.set(Box::new(|| restore_from_tray()));
+    let _ = ON_TRAY_EXIT.set(Box::new(|| {
+        let hwnd = tray_hwnd();
+        if hwnd != 0 {
+            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        }
+    }));
+}
+
+/// Hide the main window and show a tray icon in its place. Call
+/// `restore_from_tray` (in response to a tray click) to undo this.
+pub fn minimize_to_tray() {
+    let hwnd = tray_hwnd();
+    if hwnd == 0 { return; }
+    let mut nid = make_nid();
+    unsafe {
+        Shell_NotifyIconW(NIM_ADD, &mut nid);
+        ShowWindow(hwnd, SW_HIDE);
+    }
+    TRAY_ACTIVE.store(true, Ordering::SeqCst);
+}
+
+/// Remove the tray icon and restore the main window. Safe to call even if
+/// no tray icon is currently shown.
+pub fn restore_from_tray() {
+    let hwnd = tray_hwnd();
+    if hwnd == 0 { return; }
+    if TRAY_ACTIVE.swap(false, Ordering::SeqCst) {
+        let mut nid = make_nid();
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &mut nid); }
+    }
+    unsafe {
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+    }
+}
+
+fn show_tray_context_menu(hwnd: HWND) {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu == 0 { return; }
+    let restore: Vec<u16> = "Restore\0".encode_utf16().collect();
+    let exit: Vec<u16> = "Exit\0".encode_utf16().collect();
+    unsafe {
+        AppendMenuW(menu, MF_STRING, ID_TRAY_RESTORE, restore.as_ptr());
+        AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, exit.as_ptr());
+    }
+    let mut pt = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut pt) };
+    // Needed so the popup menu dismisses itself when it loses focus, per the
+    // standard tray-icon-menu dance Microsoft documents for Shell_NotifyIcon.
+    unsafe { SetForegroundWindow(hwnd) };
+    let cmd = unsafe {
+        TrackPopupMenuEx(
+            menu,
+            TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x, pt.y, hwnd, std::ptr::null(),
+        )
+    };
+    unsafe { DestroyMenu(menu) };
+    match cmd as usize {
+        ID_TRAY_RESTORE => { if let Some(cb) = ON_TRAY_RESTORE.get() { cb(); } }
+        ID_TRAY_EXIT => { if let Some(cb) = ON_TRAY_EXIT.get() { cb(); } }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Taskbar thumbnail buttons (ITaskbarList3, via raw COM interop - no `windows`
+// crate dependency). Previous/Play-Pause/Next buttons on the taskbar preview
+// thumbnail, mirroring what most media players offer.
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+struct Guid { data1: u32, data2: u16, data3: u16, data4: [u8; 8] }
+
+const CLSID_TASKBAR_LIST: Guid = Guid {
+    data1: 0x56FDF344, data2: 0xFD6D, data3: 0x11D0,
+    data4: [0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90],
+};
+const IID_ITASKBARLIST3: Guid = Guid {
+    data1: 0xEA1AFB91, data2: 0x9E28, data3: 0x4B86,
+    data4: [0x90, 0xE9, 0x9E, 0x9F, 0x8A, 0x5E, 0xEF, 0xAF],
+};
+const CLSCTX_INPROC_SERVER: u32 = 0x1;
+const COINIT_APARTMENTTHREADED: u32 = 0x2;
+
+#[repr(C)]
+struct ITaskbarList3Vtbl {
+    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    hr_init: unsafe extern "system" fn(*mut std::ffi::c_void) -> i32,
+    add_tab: unsafe extern "system" fn(*mut std::ffi::c_void, HWND) -> i32,
+    delete_tab: unsafe extern "system" fn(*mut std::ffi::c_void, HWND) -> i32,
+    activate_tab: unsafe extern "system" fn(*mut std::ffi::c_void, HWND) -> i32,
+    set_active_alt: unsafe extern "system" fn(*mut std::ffi::c_void, HWND) -> i32,
+    mark_fullscreen_window: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, i32) -> i32,
+    set_progress_value: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, u64, u64) -> i32,
+    set_progress_state: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, u32) -> i32,
+    register_tab: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, HWND) -> i32,
+    unregister_tab: unsafe extern "system" fn(*mut std::ffi::c_void, HWND) -> i32,
+    set_tab_order: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, HWND) -> i32,
+    set_tab_active: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, HWND, u32) -> i32,
+    thumb_bar_add_buttons: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, u32, *const ThumbButton) -> i32,
+    thumb_bar_update_buttons: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, u32, *const ThumbButton) -> i32,
+    thumb_bar_set_image_list: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, isize) -> i32,
+    set_overlay_icon: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, isize, *const u16) -> i32,
+    set_thumbnail_tooltip: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, *const u16) -> i32,
+    set_thumbnail_clip: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, *const RECT) -> i32,
+}
+
+#[repr(C)]
+struct ThumbButton {
+    dw_mask: u32,
+    i_id: u32,
+    i_bitmap: u32,
+    h_icon: isize,
+    sz_tip: [u16; 260],
+    dw_flags: u32,
+}
+
+const THB_ICON: u32 = 0x2;
+const THB_TOOLTIP: u32 = 0x4;
+const THB_FLAGS: u32 = 0x8;
+const THBF_ENABLED: u32 = 0x0;
+const THBN_CLICKED: u32 = 0x1800;
+const WM_COMMAND: u32 = 0x0111;
+
+#[link(name = "ole32")]
+unsafe extern "system" {
+    fn CoInitializeEx(reserved: *const std::ffi::c_void, coinit: u32) -> i32;
+    fn CoCreateInstance(rclsid: *const Guid, outer: isize, clsctx: u32, riid: *const Guid, ppv: *mut isize) -> i32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn CreateDIBSection(hdc: isize, bmi: *const BitmapInfoHeader, usage: u32, bits: *mut *mut std::ffi::c_void, hsection: isize, offset: u32) -> isize;
+    fn CreateBitmap(w: i32, h: i32, planes: u32, bit_count: u32, bits: *const std::ffi::c_void) -> isize;
+    fn CreateIconIndirect(icon_info: *const IconInfo) -> isize;
+}
+
+#[repr(C)]
+struct BitmapInfoHeader {
+    bi_size: u32,
+    bi_width: i32,
+    bi_height: i32,
+    bi_planes: u16,
+    bi_bit_count: u16,
+    bi_compression: u32,
+    bi_size_image: u32,
+    bi_x_pels_per_meter: i32,
+    bi_y_pels_per_meter: i32,
+    bi_clr_used: u32,
+    bi_clr_important: u32,
+}
+
+#[repr(C)]
+struct IconInfo {
+    f_icon: i32,
+    x_hotspot: u32,
+    y_hotspot: u32,
+    h_bitmap_mask: isize,
+    h_bitmap_color: isize,
+}
+
+static TASKBAR_LIST: AtomicIsize = AtomicIsize::new(0);
+static TASKBAR_MSG_ID: AtomicU32 = AtomicU32::new(0);
+static ICON_PREV: AtomicIsize = AtomicIsize::new(0);
+static ICON_PLAY: AtomicIsize = AtomicIsize::new(0);
+static ICON_PAUSE: AtomicIsize = AtomicIsize::new(0);
+static ICON_NEXT: AtomicIsize = AtomicIsize::new(0);
+/// Button id (0 = previous, 1 = play/pause, 2 = next) clicked on the taskbar
+/// thumbnail, drained by a polling subscription in app.rs - same
+/// WndProc-land-to-iced-land bridge pattern as `PENDING_OPEN_FILE`.
+static PENDING_THUMB_ACTION: Mutex<Option<u8>> = Mutex::new(None);
+
+/// Renders a small transparent-background glyph (16x16, white on
+/// transparent) into an HICON: 0 = previous, 1 = play, 2 = pause, 3 = next.
+/// Hand-drawn rather than shipping extra icon assets, since these are only
+/// ever seen tiny in the taskbar thumbnail toolbar.
+fn make_glyph_icon(kind: u8) -> isize {
+    const W: i32 = 16;
+    const H: i32 = 16;
+    let bmi = BitmapInfoHeader {
+        bi_size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+        bi_width: W,
+        bi_height: -H, // negative = top-down
+        bi_planes: 1,
+        bi_bit_count: 32,
+        bi_compression: 0, // BI_RGB
+        bi_size_image: 0,
+        bi_x_pels_per_meter: 0,
+        bi_y_pels_per_meter: 0,
+        bi_clr_used: 0,
+        bi_clr_important: 0,
+    };
+    let screen_dc = unsafe { GetDC(0) };
+    let mut bits_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let hbm_color = unsafe { CreateDIBSection(screen_dc, &bmi, 0, &mut bits_ptr, 0, 0) };
+    unsafe { ReleaseDC(0, screen_dc) };
+    if hbm_color == 0 || bits_ptr.is_null() {
+        return 0;
+    }
+    let pixels = unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, (W * H * 4) as usize) };
+    let filled = |x: i32, y: i32| -> bool {
+        match kind {
+            1 => { // play: right-pointing triangle
+                let t = 1.0 - ((y as f32 - 8.0).abs() / 5.0);
+                x >= 4 && (y >= 3 && y <= 13) && (x as f32) <= 4.0 + 8.0 * t.max(0.0)
+            }
+            2 => { // pause: two bars
+                (y >= 3 && y <= 13) && ((3..6).contains(&x) || (10..13).contains(&x))
+            }
+            3 => { // next: small triangle + bar
+                let t = 1.0 - ((y as f32 - 8.0).abs() / 5.0);
+                let tri = x >= 2 && (y >= 3 && y <= 13) && (x as f32) <= 2.0 + 6.0 * t.max(0.0);
+                let bar = (y >= 3 && y <= 13) && (11..13).contains(&x);
+                tri || bar
+            }
+            _ => { // previous: bar + mirrored triangle
+                let t = 1.0 - ((y as f32 - 8.0).abs() / 5.0);
+                let bar = (y >= 3 && y <= 13) && (3..5).contains(&x);
+                let tri = x <= 14 && (y >= 3 && y <= 13) && (x as f32) >= 14.0 - 6.0 * t.max(0.0);
+                bar || tri
+            }
+        }
+    };
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            if filled(x, y) {
+                pixels[i] = 240; pixels[i + 1] = 240; pixels[i + 2] = 240; pixels[i + 3] = 255;
+            } else {
+                pixels[i] = 0; pixels[i + 1] = 0; pixels[i + 2] = 0; pixels[i + 3] = 0;
+            }
+        }
+    }
+    // AND mask is ignored for 32bpp-with-alpha icons on XP+, but
+    // CreateIconIndirect still requires a validly-sized mask bitmap.
+    let mask_bytes = vec![0u8; (((W + 15) / 16) * 2 * H) as usize];
+    let hbm_mask = unsafe { CreateBitmap(W, H, 1, 1, mask_bytes.as_ptr() as *const _) };
+    let info = IconInfo { f_icon: 1, x_hotspot: 0, y_hotspot: 0, h_bitmap_mask: hbm_mask, h_bitmap_color: hbm_color };
+    unsafe { CreateIconIndirect(&info) }
+}
+
+fn glyph_icon(kind: u8) -> isize {
+    let cell = match kind { 0 => &ICON_PREV, 1 => &ICON_PLAY, 2 => &ICON_PAUSE, _ => &ICON_NEXT };
+    let existing = cell.load(Ordering::Relaxed);
+    if existing != 0 { return existing; }
+    let icon = make_glyph_icon(kind);
+    cell.store(icon, Ordering::Relaxed);
+    icon
+}
+
+fn make_thumb_button(id: u32, icon: isize, tip: &str) -> ThumbButton {
+    let mut sz_tip = [0u16; 260];
+    for (i, c) in tip.encode_utf16().enumerate().take(259) {
+        sz_tip[i] = c;
+    }
+    ThumbButton {
+        dw_mask: THB_ICON | THB_TOOLTIP | THB_FLAGS,
+        i_id: id,
+        i_bitmap: 0,
+        h_icon: icon,
+        sz_tip,
+        dw_flags: THBF_ENABLED,
+    }
+}
+
+fn add_thumbbar_buttons(hwnd: HWND) {
+    let p = TASKBAR_LIST.load(Ordering::SeqCst);
+    if p == 0 { return; }
+    let buttons = [
+        make_thumb_button(0, glyph_icon(0), "Previous"),
+        make_thumb_button(1, glyph_icon(1), "Play"),
+        make_thumb_button(2, glyph_icon(3), "Next"),
+    ];
+    unsafe {
+        let vtbl = *(p as *mut *mut ITaskbarList3Vtbl);
+        ((*vtbl).thumb_bar_add_buttons)(p as *mut _, hwnd, buttons.len() as u32, buttons.as_ptr());
+    }
+}
+
+fn taskbar_on_created(hwnd: HWND) {
+    let p = TASKBAR_LIST.load(Ordering::SeqCst);
+    if p == 0 { return; }
+    unsafe {
+        let vtbl = *(p as *mut *mut ITaskbarList3Vtbl);
+        ((*vtbl).hr_init)(p as *mut _);
+    }
+    add_thumbbar_buttons(hwnd);
+}
+
+/// One-time setup: creates the `ITaskbarList3` COM object and registers the
+/// "TaskbarButtonCreated" message (sent once the taskbar button for our
+/// window exists, and again if Explorer restarts) that triggers adding the
+/// thumbnail buttons.
+pub fn install_thumbbar() {
+    unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+    let mut ppv: isize = 0;
+    let hr = unsafe { CoCreateInstance(&CLSID_TASKBAR_LIST, 0, CLSCTX_INPROC_SERVER, &IID_ITASKBARLIST3, &mut ppv) };
+    if hr == 0 && ppv != 0 {
+        TASKBAR_LIST.store(ppv, Ordering::SeqCst);
+    } else {
+        tracing::warn!(hr, "taskbar thumb buttons: CoCreateInstance failed");
+    }
+    let name: Vec<u16> = "TaskbarButtonCreated\0".encode_utf16().collect();
+    let id = unsafe { RegisterWindowMessageW(name.as_ptr()) };
+    TASKBAR_MSG_ID.store(id, Ordering::SeqCst);
+}
+
+/// Swap the middle (play/pause) thumb button's icon/tooltip to match current
+/// playback state. Call whenever pause state changes.
+pub fn update_thumbbar_playpause(paused: bool) {
+    let hwnd = tray_hwnd();
+    let p = TASKBAR_LIST.load(Ordering::SeqCst);
+    if p == 0 || hwnd == 0 { return; }
+    let (icon_kind, tip) = if paused { (1, "Play") } else { (2, "Pause") };
+    let buttons = [make_thumb_button(1, glyph_icon(icon_kind), tip)];
+    unsafe {
+        let vtbl = *(p as *mut *mut ITaskbarList3Vtbl);
+        ((*vtbl).thumb_bar_update_buttons)(p as *mut _, hwnd, buttons.len() as u32, buttons.as_ptr());
+    }
+}
+
+/// Drain the last taskbar thumb button clicked (0 = previous, 1 = play/pause,
+/// 2 = next), if any - polled from app.rs.
+pub fn take_pending_thumb_action() -> Option<u8> {
+    PENDING_THUMB_ACTION.lock().ok()?.take()
+}
+
+// ---------------------------------------------------------------------------
+// System Media Transport Controls (SMTC) - lock screen / volume flyout /
+// media-key integration, via raw WinRT interop (no `windows` crate). All the
+// interface IIDs below (including the generic `TypedEventHandler` delegate's
+// pinned IID, which isn't published anywhere - it's algorithmically derived)
+// were verified empirically against Microsoft's own `windows` crate on this
+// machine rather than hand-computed, since a wrong GUID here fails silently.
+// ---------------------------------------------------------------------------
+
+const IID_IUNKNOWN: Guid = Guid {
+    data1: 0x00000000, data2: 0x0000, data3: 0x0000,
+    data4: [0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46],
+};
+const IID_ISYSTEMMEDIATRANSPORTCONTROLSINTEROP: Guid = Guid {
+    data1: 0xDDB0472D, data2: 0xC911, data3: 0x4A1F,
+    data4: [0x86, 0xD9, 0xDC, 0x3D, 0x71, 0xA9, 0x5F, 0x5A],
+};
+const IID_ISYSTEMMEDIATRANSPORTCONTROLS: Guid = Guid {
+    data1: 0x99FA3FF4, data2: 0x1742, data3: 0x42A6,
+    data4: [0x90, 0x2E, 0x08, 0x7D, 0x41, 0xF9, 0x65, 0xEC],
+};
+const IID_BUTTONPRESSED_HANDLER: Guid = Guid {
+    data1: 0x0557E996, data2: 0x7B23, data3: 0x5BAE,
+    data4: [0xAA, 0x81, 0xEA, 0x0D, 0x67, 0x11, 0x43, 0xA4],
+};
+
+fn guid_eq(a: &Guid, b: &Guid) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
+const RO_INIT_MULTITHREADED: u32 = 1;
+const E_NOINTERFACE: i32 = 0x80004002u32 as i32;
+
+#[link(name = "runtimeobject")]
+unsafe extern "system" {
+    fn RoInitialize(init_type: u32) -> i32;
+    fn WindowsCreateString(src: *const u16, len: u32, out: *mut isize) -> i32;
+    fn WindowsDeleteString(hstring: isize) -> i32;
+    fn RoGetActivationFactory(class_id: isize, riid: *const Guid, factory: *mut isize) -> i32;
+}
+
+/// `IInspectable`-based vtable prefix shared by every WinRT interface (after
+/// this comes each interface's own methods, in IDL declaration order).
+#[repr(C)]
+struct InspectableVtbl {
+    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    get_iids: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u32, *mut *mut Guid) -> i32,
+    get_runtime_class_name: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    get_trust_level: unsafe extern "system" fn(*mut std::ffi::c_void, *mut i32) -> i32,
+}
+
+#[repr(C)]
+struct InteropVtbl {
+    base: InspectableVtbl,
+    get_for_window: unsafe extern "system" fn(*mut std::ffi::c_void, HWND, *const Guid, *mut isize) -> i32,
+}
+
+#[repr(C)]
+struct SmtcVtbl {
+    base: InspectableVtbl,
+    get_playback_status: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u32) -> i32,
+    put_playback_status: unsafe extern "system" fn(*mut std::ffi::c_void, u32) -> i32,
+    get_display_updater: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    get_sound_level: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u32) -> i32,
+    get_is_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_play_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_play_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_stop_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_stop_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_pause_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_pause_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_record_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_record_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_fast_forward_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_fast_forward_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_rewind_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_rewind_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_previous_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_previous_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_next_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_next_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_channel_up_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_channel_up_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    get_is_channel_down_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u8) -> i32,
+    put_is_channel_down_enabled: unsafe extern "system" fn(*mut std::ffi::c_void, u8) -> i32,
+    add_button_pressed: unsafe extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut i64) -> i32,
+    remove_button_pressed: unsafe extern "system" fn(*mut std::ffi::c_void, i64) -> i32,
+    add_property_changed: unsafe extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut i64) -> i32,
+    remove_property_changed: unsafe extern "system" fn(*mut std::ffi::c_void, i64) -> i32,
+}
+
+#[repr(C)]
+struct DisplayUpdaterVtbl {
+    base: InspectableVtbl,
+    get_type: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u32) -> i32,
+    put_type: unsafe extern "system" fn(*mut std::ffi::c_void, u32) -> i32,
+    get_app_media_id: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    put_app_media_id: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+    get_thumbnail: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    put_thumbnail: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+    get_music_properties: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    get_video_properties: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    get_image_properties: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    copy_from_file_async: unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut std::ffi::c_void, *mut isize) -> i32,
+    clear_all: unsafe extern "system" fn(*mut std::ffi::c_void) -> i32,
+    update: unsafe extern "system" fn(*mut std::ffi::c_void) -> i32,
+}
+
+#[repr(C)]
+struct VideoDisplayPropertiesVtbl {
+    base: InspectableVtbl,
+    get_title: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    put_title: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+    get_subtitle: unsafe extern "system" fn(*mut std::ffi::c_void, *mut isize) -> i32,
+    put_subtitle: unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32,
+}
+
+#[repr(C)]
+struct ButtonArgsVtbl {
+    base: InspectableVtbl,
+    get_button: unsafe extern "system" fn(*mut std::ffi::c_void, *mut u32) -> i32,
+}
+
+#[repr(C)]
+struct DelegateVtbl {
+    query_interface: unsafe extern "system" fn(*mut std::ffi::c_void, *const Guid, *mut *mut std::ffi::c_void) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    invoke: unsafe extern "system" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void) -> i32,
+}
+
+#[repr(C)]
+struct ButtonPressedDelegate {
+    vtbl: *const DelegateVtbl,
+    refcount: AtomicU32,
+}
+
+static DELEGATE_VTBL: DelegateVtbl = DelegateVtbl {
+    query_interface: delegate_query_interface,
+    add_ref: delegate_add_ref,
+    release: delegate_release,
+    invoke: delegate_invoke,
+};
+
+unsafe extern "system" fn delegate_query_interface(this: *mut std::ffi::c_void, riid: *const Guid, ppv: *mut *mut std::ffi::c_void) -> i32 {
+    let iid = unsafe { &*riid };
+    if guid_eq(iid, &IID_IUNKNOWN) || guid_eq(iid, &IID_BUTTONPRESSED_HANDLER) {
+        unsafe { delegate_add_ref(this) };
+        unsafe { *ppv = this };
+        0
+    } else {
+        unsafe { *ppv = std::ptr::null_mut() };
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "system" fn delegate_add_ref(this: *mut std::ffi::c_void) -> u32 {
+    let obj = unsafe { &*(this as *const ButtonPressedDelegate) };
+    obj.refcount.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+unsafe extern "system" fn delegate_release(this: *mut std::ffi::c_void) -> u32 {
+    // Intentionally never freed - this delegate lives for the process's
+    // lifetime (registered once at startup, never unregistered).
+    let obj = unsafe { &*(this as *const ButtonPressedDelegate) };
+    obj.refcount.fetch_sub(1, Ordering::SeqCst) - 1
+}
+
+unsafe extern "system" fn delegate_invoke(_this: *mut std::ffi::c_void, _sender: *mut std::ffi::c_void, args: *mut std::ffi::c_void) -> i32 {
+    if !args.is_null() {
+        let vtbl = unsafe { *(args as *mut *const ButtonArgsVtbl) };
+        let mut button: u32 = 0;
+        unsafe { ((*vtbl).get_button)(args, &mut button) };
+        // Reuses the same 0=previous/1=play-pause/2=next scheme as the
+        // taskbar thumb buttons - same poll path in app.rs handles both.
+        let action = match button {
+            7 => Some(0u8), // Previous
+            6 => Some(2u8), // Next
+            0 | 1 => Some(1u8), // Play or Pause -> toggle
+            _ => None,
+        };
+        if let Some(a) = action {
+            if let Ok(mut guard) = PENDING_THUMB_ACTION.lock() {
+                *guard = Some(a);
+            }
+        }
+    }
+    0
+}
+
+static SMTC: AtomicIsize = AtomicIsize::new(0);
+static DISPLAY_UPDATER: AtomicIsize = AtomicIsize::new(0);
+
+fn make_hstring(s: &str) -> isize {
+    let wide: Vec<u16> = s.encode_utf16().collect();
+    let mut out: isize = 0;
+    unsafe { WindowsCreateString(wide.as_ptr(), wide.len() as u32, &mut out) };
+    out
+}
+
+fn init_smtc_for_hwnd(hwnd: HWND) {
+    unsafe { RoInitialize(RO_INIT_MULTITHREADED) };
+
+    let class_id = make_hstring("Windows.Media.SystemMediaTransportControls");
+    if class_id == 0 { return; }
+    let mut factory: isize = 0;
+    let hr = unsafe { RoGetActivationFactory(class_id, &IID_ISYSTEMMEDIATRANSPORTCONTROLSINTEROP, &mut factory) };
+    unsafe { WindowsDeleteString(class_id) };
+    if hr != 0 || factory == 0 {
+        tracing::warn!(hr, "SMTC: RoGetActivationFactory failed");
+        return;
+    }
+
+    let mut smtc: isize = 0;
+    unsafe {
+        let vtbl = *(factory as *mut *const InteropVtbl);
+        ((*vtbl).get_for_window)(factory as *mut _, hwnd, &IID_ISYSTEMMEDIATRANSPORTCONTROLS, &mut smtc);
+        ((*vtbl).base.release)(factory as *mut _);
+    }
+    if smtc == 0 {
+        tracing::warn!("SMTC: GetForWindow failed");
+        return;
+    }
+    SMTC.store(smtc, Ordering::SeqCst);
+
+    unsafe {
+        let vtbl = *(smtc as *mut *const SmtcVtbl);
+        ((*vtbl).put_is_enabled)(smtc as *mut _, 1);
+        ((*vtbl).put_is_play_enabled)(smtc as *mut _, 1);
+        ((*vtbl).put_is_pause_enabled)(smtc as *mut _, 1);
+        ((*vtbl).put_is_next_enabled)(smtc as *mut _, 1);
+        ((*vtbl).put_is_previous_enabled)(smtc as *mut _, 1);
+
+        let delegate = Box::into_raw(Box::new(ButtonPressedDelegate {
+            vtbl: &DELEGATE_VTBL,
+            refcount: AtomicU32::new(1),
+        })) as *mut std::ffi::c_void;
+        let mut token: i64 = 0;
+        ((*vtbl).add_button_pressed)(smtc as *mut _, delegate, &mut token);
+
+        let mut updater: isize = 0;
+        ((*vtbl).get_display_updater)(smtc as *mut _, &mut updater);
+        if updater != 0 {
+            DISPLAY_UPDATER.store(updater, Ordering::SeqCst);
+            let uvtbl = *(updater as *mut *const DisplayUpdaterVtbl);
+            const MEDIA_PLAYBACK_TYPE_VIDEO: u32 = 2;
+            ((*uvtbl).put_type)(updater as *mut _, MEDIA_PLAYBACK_TYPE_VIDEO);
+            ((*uvtbl).update)(updater as *mut _);
+        }
+    }
+}
+
+/// One-time setup: waits for the main window handle to be resolved (see
+/// `install()`), then creates the SMTC object bound to it. Runs on its own
+/// worker thread since GetForWindow needs a real HWND and WinRT calls here
+/// are otherwise blocking; the thread is left running as an MTA COM
+/// apartment so ButtonPressed callbacks can arrive on RPC worker threads
+/// without needing a message pump of their own.
+pub fn install_smtc() {
+    std::thread::spawn(|| {
+        for _ in 0..50 {
+            let hwnd = OWN_HWND.load(Ordering::SeqCst);
+            if hwnd != 0 {
+                init_smtc_for_hwnd(hwnd);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tracing::warn!("SMTC: gave up waiting for main hwnd after 5s");
+    });
+}
+
+/// Update the lock-screen/flyout playback state. `paused` reflects mpv's
+/// current pause flag.
+pub fn update_smtc_playback(paused: bool) {
+    let smtc = SMTC.load(Ordering::SeqCst);
+    if smtc == 0 { return; }
+    const MEDIA_PLAYBACK_STATUS_PLAYING: u32 = 3;
+    const MEDIA_PLAYBACK_STATUS_PAUSED: u32 = 4;
+    let status = if paused { MEDIA_PLAYBACK_STATUS_PAUSED } else { MEDIA_PLAYBACK_STATUS_PLAYING };
+    unsafe {
+        let vtbl = *(smtc as *mut *const SmtcVtbl);
+        ((*vtbl).put_playback_status)(smtc as *mut _, status);
+    }
+}
+
+/// Update the lock-screen/flyout title text (e.g. the file name).
+pub fn update_smtc_metadata(title: &str) {
+    let updater = DISPLAY_UPDATER.load(Ordering::SeqCst);
+    if updater == 0 { return; }
+    unsafe {
+        let uvtbl = *(updater as *mut *const DisplayUpdaterVtbl);
+        let mut video_props: isize = 0;
+        ((*uvtbl).get_video_properties)(updater as *mut _, &mut video_props);
+        if video_props != 0 {
+            let vvtbl = *(video_props as *mut *const VideoDisplayPropertiesVtbl);
+            let title_hstr = make_hstring(title);
+            ((*vvtbl).put_title)(video_props as *mut _, title_hstr);
+            WindowsDeleteString(title_hstr);
+            ((*vvtbl).base.release)(video_props as *mut _);
+        }
+        ((*uvtbl).update)(updater as *mut _);
+    }
+}
 
 #[repr(C)]
 struct CopyDataStruct {
@@ -163,6 +934,87 @@ pub fn take_pending_open_file() -> Option<String> {
     PENDING_OPEN_FILE.lock().ok()?.take()
 }
 
+const HKEY_CURRENT_USER: isize = 0x80000001u32 as i32 as isize;
+const KEY_WRITE: u32 = 0x20006;
+const REG_SZ: u32 = 1;
+
+fn reg_set_string(hkey_parent: isize, subkey: &str, value_name: Option<&str>, data: &str) -> bool {
+    let subkey_w: Vec<u16> = subkey.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hkey: isize = 0;
+    let mut disposition = 0u32;
+    let rc = unsafe {
+        RegCreateKeyExW(
+            hkey_parent, subkey_w.as_ptr(), 0, std::ptr::null(),
+            0, KEY_WRITE, std::ptr::null(), &mut hkey, &mut disposition,
+        )
+    };
+    if rc != 0 {
+        return false;
+    }
+    let value_name_w: Vec<u16> = value_name.map(|v| v.encode_utf16().chain(std::iter::once(0)).collect()).unwrap_or_default();
+    let data_w: Vec<u16> = data.encode_utf16().chain(std::iter::once(0)).collect();
+    let data_bytes = unsafe { std::slice::from_raw_parts(data_w.as_ptr() as *const u8, data_w.len() * 2) };
+    let name_ptr = if value_name.is_some() { value_name_w.as_ptr() } else { std::ptr::null() };
+    let ok = unsafe { RegSetValueExW(hkey, name_ptr, 0, REG_SZ, data_bytes.as_ptr(), data_bytes.len() as u32) } == 0;
+    unsafe { RegCloseKey(hkey) };
+    ok
+}
+
+/// Media extensions the file browser/folder-playlist logic already
+/// recognizes - kept in sync manually with `app::MEDIA_EXTS` since that one
+/// lives in a plain (non-Windows-gated) module.
+const ASSOC_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "webm", "m4v", "flv", "wmv", "ts",
+    "mp3", "flac", "ogg", "wav", "aac", "opus",
+];
+
+/// Register MPV-NE as an "Open with" candidate for its supported media
+/// extensions (HKEY_CURRENT_USER, no admin rights needed). Since Windows 8,
+/// an app cannot silently make itself the *default* handler - only the user
+/// can do that, via Settings - so this only registers us as a valid choice;
+/// see `open_default_apps_settings` for the follow-up step.
+pub fn register_file_associations() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let open_cmd = format!("\"{}\" \"%1\"", exe.to_string_lossy());
+
+    let mut ok = reg_set_string(
+        HKEY_CURRENT_USER,
+        "Software\\Classes\\Applications\\mpv-ne.exe\\shell\\open\\command",
+        None,
+        &open_cmd,
+    );
+    ok &= reg_set_string(
+        HKEY_CURRENT_USER,
+        "Software\\Classes\\Applications\\mpv-ne.exe",
+        Some("FriendlyAppName"),
+        "MPV-NE",
+    );
+
+    const PROGID: &str = "MPVNE.MediaFile";
+    ok &= reg_set_string(
+        HKEY_CURRENT_USER,
+        &format!("Software\\Classes\\{PROGID}\\shell\\open\\command"),
+        None,
+        &open_cmd,
+    );
+    ok &= reg_set_string(HKEY_CURRENT_USER, &format!("Software\\Classes\\{PROGID}"), None, "MPV-NE Media File");
+
+    for ext in ASSOC_EXTS {
+        let key = format!("Software\\Classes\\.{ext}\\OpenWithProgids");
+        ok &= reg_set_string(HKEY_CURRENT_USER, &key, Some(PROGID), "");
+    }
+    ok
+}
+
+/// Open Windows' own "Default apps" settings page so the user can actually
+/// pick MPV-NE as the default for whichever extensions they want - the step
+/// `register_file_associations` can't do on the app's own behalf.
+pub fn open_default_apps_settings() {
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let uri: Vec<u16> = "ms-settings:defaultapps\0".encode_utf16().collect();
+    unsafe { ShellExecuteW(0, op.as_ptr(), uri.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+}
+
 /// True while the main window is minimized. Used to drive "hide all windows
 /// when minimized" and "pause when minimized" - both poll this rather than
 /// hooking WM_SIZE, since neither needs sub-frame latency.
@@ -176,7 +1028,14 @@ pub fn is_main_window_minimized() -> bool {
 
 const GW_OWNER:                u32 = 4;
 const MONITOR_DEFAULTTONULL:    u32 = 0;
+const MONITOR_DEFAULTTOPRIMARY: u32 = 1;
 const MONITOR_DEFAULTTONEAREST: u32 = 2;
+const MDT_EFFECTIVE_DPI: u32 = 0;
+
+#[link(name = "shcore")]
+unsafe extern "system" {
+    fn GetDpiForMonitor(hmon: HMONITOR, dpi_type: u32, dpi_x: *mut u32, dpi_y: *mut u32) -> i32;
+}
 const WM_ENTERMENULOOP: u32 = 0x0211;
 const WM_EXITMENULOOP:  u32 = 0x0212;
 const WM_ENTERSIZEMOVE: u32 = 0x0231;
@@ -317,7 +1176,25 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, _: isize) -> i32 {
 // ---------------------------------------------------------------------------
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> isize {
+    let taskbar_msg = TASKBAR_MSG_ID.load(Ordering::Relaxed);
+    if taskbar_msg != 0 && msg == taskbar_msg {
+        taskbar_on_created(hwnd);
+        let orig = ORIG_WNDPROC.load(Ordering::SeqCst);
+        return unsafe { CallWindowProcW(orig, hwnd, msg, w, l) };
+    }
     match msg {
+        WM_COMMAND => {
+            let hiword = ((w >> 16) & 0xFFFF) as u32;
+            let loword = (w & 0xFFFF) as u32;
+            if hiword == THBN_CLICKED {
+                if let Ok(mut guard) = PENDING_THUMB_ACTION.lock() {
+                    *guard = Some(loword as u8);
+                }
+                return 0;
+            }
+            let orig = ORIG_WNDPROC.load(Ordering::SeqCst);
+            return unsafe { CallWindowProcW(orig, hwnd, msg, w, l) };
+        }
         WM_COPYDATA => {
             // A newer launch forwarded a file path to us via
             // `send_open_file_to` (single-instance mode) - decode the
@@ -337,6 +1214,16 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, w: usize, l: isize) -> 
                 }
             }
             return 1;
+        }
+        WM_TRAYICON => {
+            match l as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                    if let Some(cb) = ON_TRAY_RESTORE.get() { cb(); }
+                }
+                WM_RBUTTONUP => show_tray_context_menu(hwnd),
+                _ => {}
+            }
+            return 0;
         }
         WM_ENTERMENULOOP => {
             // Pause mpv during native menu loops - they block iced's event loop
@@ -527,6 +1414,39 @@ pub fn work_area_near(x: i32, y: i32) -> (i32, i32, i32, i32) {
     };
     if hmon != 0 { unsafe { GetMonitorInfoW(hmon, &mut mi) }; }
     (mi.rc_work.left, mi.rc_work.top, mi.rc_work.right, mi.rc_work.bottom)
+}
+
+/// DPI scale factor (1.0 = 96 DPI/100%) of the monitor nearest `(x, y)`, or
+/// of the primary monitor if `None` (used for the initial centered-window
+/// case, before any window - and thus any real target monitor - exists).
+///
+/// Needed so `boot()` can request the *correct* physical window size up
+/// front: without this, the window opens assuming 100% scale, then gets
+/// asynchronously resized once the real scale factor is queried from the
+/// live window - leaving a brief window where the controls bar lays out at
+/// the wrong (pre-correction) size and looks visibly broken until the next
+/// resize (manual or automatic) forces a fresh layout.
+pub fn dpi_scale_near(pos: Option<(i32, i32)>) -> f32 {
+    let hmon = match pos {
+        Some((x, y)) => {
+            let rect = RECT { left: x, top: y, right: x + 1, bottom: y + 1 };
+            unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST) }
+        }
+        None => {
+            let pt = POINT { x: 0, y: 0 };
+            unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY) }
+        }
+    };
+    if hmon == 0 {
+        return 1.0;
+    }
+    let mut dpi_x: u32 = 96;
+    let mut dpi_y: u32 = 96;
+    let hr = unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    if hr != 0 || dpi_x == 0 {
+        return 1.0;
+    }
+    dpi_x as f32 / 96.0
 }
 
 pub fn install(

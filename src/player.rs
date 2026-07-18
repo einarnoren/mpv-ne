@@ -89,6 +89,7 @@ pub enum PlayerEvent {
     SubVisible(bool),
     SubTracks(Vec<SubTrack>),
     CurrentSid(i64),
+    CurrentSecondarySid(i64),
     Chapters(Vec<Chapter>),
     AudioTracks(Vec<AudioTrack>),
     CurrentAid(i64),
@@ -199,6 +200,8 @@ pub struct Player {
     pub sub_tracks: Vec<SubTrack>,
     /// Currently active subtitle track id (0 = none / off).
     pub current_sid: i64,
+    /// Currently active secondary subtitle track id (0 = none / off).
+    pub current_secondary_sid: i64,
     pub chapters: Vec<Chapter>,
     pub audio_tracks: Vec<AudioTrack>,
     /// Currently active audio track id (0 = none / off).
@@ -213,6 +216,10 @@ pub struct Player {
     pub deinterlace: bool,
     /// mpv `video-zoom` property (log2 scale: 0.0 = 100%, 1.0 = 200%, -1.0 = 50%).
     pub video_zoom: f64,
+    /// mpv `video-pan-x`/`-y` (normalized offset). Local mirror only - see
+    /// `set_video_pan`.
+    pub video_pan_x: f64,
+    pub video_pan_y: f64,
     /// Furthest buffered timestamp (from demuxer-cache-time). 0 = unknown/local.
     pub cache_time: f64,
     pub brightness: i64,
@@ -323,6 +330,7 @@ impl Player {
             observe(h, 27, "video-zoom",         sys::mpv_format_MPV_FORMAT_DOUBLE);
             observe(h, 28, "demuxer-cache-time", sys::mpv_format_MPV_FORMAT_DOUBLE);
             observe(h, 29, "eof-reached", sys::mpv_format_MPV_FORMAT_FLAG);
+            observe(h, 30, "secondary-sid", sys::mpv_format_MPV_FORMAT_STRING);
 
             // Forward mpv's own internal log messages (decoder/vo/demuxer
             // warnings and errors) into our event stream - without this we
@@ -356,6 +364,7 @@ impl Player {
                 sub_visible: true,
                 sub_tracks: vec![SubTrack { id: 0, label: "Off".to_string() }],
                 current_sid: 0,
+                current_secondary_sid: 0,
                 chapters: Vec::new(),
                 audio_tracks: vec![AudioTrack { id: 0, label: "Off".to_string() }],
                 current_aid: 0,
@@ -373,6 +382,8 @@ impl Player {
                 hue: 0,
                 gamma: 0,
                 video_zoom: 0.0,
+                video_pan_x: 0.0,
+                video_pan_y: 0.0,
                 cache_time: 0.0,
                 vf_slots: std::collections::HashMap::new(),
                 eq_gains: vec![0.0; EQ_BANDS.len()],
@@ -453,10 +464,28 @@ impl Player {
         command(self.handle.0, &["seek", &delta.to_string(), "relative"]);
     }
 
+    /// Step forward/back exactly one video frame. Most useful while paused -
+    /// mpv pauses automatically on the first step if not already paused, so
+    /// this doubles as a "pause and step" shortcut too.
+    pub fn frame_step(&self) {
+        command(self.handle.0, &["frame-step"]);
+    }
+
+    pub fn frame_back_step(&self) {
+        command(self.handle.0, &["frame-back-step"]);
+    }
+
     /// Cycle through subtitle tracks. mpv treats "no subtitles" as one of the
     /// cycle states, so this both toggles visibility and switches tracks.
     pub fn cycle_subtitle(&self) {
         command(self.handle.0, &["cycle", "sub"]);
+    }
+
+    /// Seek to the start of the next/previous subtitle line (mpv's
+    /// `sub-seek`). Only reliable with `sub-visibility` on and may not work
+    /// with all external subtitle formats - same caveat mpv itself documents.
+    pub fn sub_seek(&self, forward: bool) {
+        command(self.handle.0, &["sub-seek", if forward { "1" } else { "-1" }]);
     }
 
     /// Pick a subtitle track by id. id <= 0 means "off" (sid=no), id > 0 is a
@@ -464,6 +493,16 @@ impl Player {
     pub fn set_sub_track(&self, id: i64) {
         let value = if id <= 0 { "no".to_string() } else { id.to_string() };
         let n = CString::new("sid").unwrap();
+        let v = CString::new(value).unwrap();
+        unsafe { sys::mpv_set_property_string(self.handle.0, n.as_ptr(), v.as_ptr()) };
+    }
+
+    /// Pick a *second*, independently-shown subtitle track (mpv's
+    /// `secondary-sid`) - e.g. showing a dub language's subs alongside the
+    /// original language's. id <= 0 turns it off.
+    pub fn set_secondary_sub_track(&self, id: i64) {
+        let value = if id <= 0 { "no".to_string() } else { id.to_string() };
+        let n = CString::new("secondary-sid").unwrap();
         let v = CString::new(value).unwrap();
         unsafe { sys::mpv_set_property_string(self.handle.0, n.as_ptr(), v.as_ptr()) };
     }
@@ -524,6 +563,15 @@ impl Player {
 
     pub fn set_video_zoom(&self, zoom: f64) {
         set_prop_f64(self.handle.0, "video-zoom", zoom);
+    }
+
+    /// Pan the video within the window (mpv `video-pan-x`/`-y`, normalized as
+    /// a factor of video width/height). Meant for click-drag panning while
+    /// zoomed in - we're the only writer, so unlike `video_zoom` there's no
+    /// need to observe it back from mpv.
+    pub fn set_video_pan(&self, x: f64, y: f64) {
+        set_prop_f64(self.handle.0, "video-pan-x", x);
+        set_prop_f64(self.handle.0, "video-pan-y", y);
     }
 
     /// Override the display aspect ratio. Pass `""` to restore auto (-1).
@@ -996,6 +1044,12 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                             .and_then(|s| s.parse::<i64>().ok())
                             .unwrap_or(0);
                         let _ = tx.send(PlayerEvent::CurrentSid(id));
+                    }
+                    ("secondary-sid", sys::mpv_format_MPV_FORMAT_STRING) => {
+                        let id = read_string_prop(prop.data)
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0);
+                        let _ = tx.send(PlayerEvent::CurrentSecondarySid(id));
                     }
                     ("aid", sys::mpv_format_MPV_FORMAT_STRING) => {
                         let id = read_string_prop(prop.data)

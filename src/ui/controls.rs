@@ -31,19 +31,20 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         icons::tipped(b, "Stop")
     };
 
+    let step = app.seek_step_secs;
     let skip_back = {
         let mut b = icons::square_btn(icons::rewind());
         if has_media {
-            b = b.on_press(Message::SeekRelative(-10.0));
+            b = b.on_press(Message::SeekStep(false));
         }
-        icons::tipped(b, "Back 10 s (←)")
+        icons::tipped(b, format!("Back {step:.0} s (←)"))
     };
     let skip_fwd = {
         let mut b = icons::square_btn(icons::fast_forward());
         if has_media {
-            b = b.on_press(Message::SeekRelative(10.0));
+            b = b.on_press(Message::SeekStep(true));
         }
-        icons::tipped(b, "Forward 10 s (→)")
+        icons::tipped(b, format!("Forward {step:.0} s (→)"))
     };
 
     let prev_btn = {

@@ -89,11 +89,11 @@ pub fn square_toggle<'a, Message: Clone + 'a>(
 /// Wrap any widget with a small dark tooltip above it.
 pub fn tipped<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
-    label: &'static str,
+    label: impl ToString,
 ) -> Element<'a, Message> {
     tooltip(
         content,
-        container(text(label).size(11).color(TEXT_BRIGHT))
+        container(text(label.to_string()).size(11).color(TEXT_BRIGHT))
             .padding([4, 8])
             .style(|_| iced::widget::container::Style {
                 background: Some(iced::Background::Color(BG_DEEPEST)),

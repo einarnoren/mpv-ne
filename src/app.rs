@@ -71,6 +71,7 @@ pub enum PanelKind {
 pub enum AppSettingsCategory {
     Interface,
     Keyboard,
+    Mouse,
 }
 
 impl Default for AppSettingsCategory {
@@ -117,6 +118,18 @@ pub enum Action {
     AddBookmark,
     ToggleStats,
     CycleFrameMode,
+    /// Seek by the configurable step size (`MpvNe::seek_step_secs`),
+    /// forward if `true`. Distinct from `SeekRelative` (a fixed amount)
+    /// since `KEY_SLOTS` bakes its action at compile time and can't read
+    /// runtime app state directly.
+    SeekStep(bool),
+    /// Step exactly one video frame, forward if `true`.
+    FrameStep(bool),
+    /// Adjust speed by the configurable step size (`MpvNe::speed_step`),
+    /// faster if `true` - same reasoning as `SeekStep`.
+    SpeedStep(bool),
+    /// Seek to the start of the next/previous subtitle line, forward if `true`.
+    SubSeek(bool),
 }
 
 /// How the video frame is fitted into the window. Cycled with the Z key and
@@ -158,8 +171,8 @@ impl FrameMode {
 /// fullscreen, and is handled directly in the `InputKey` handler instead.
 pub const KEY_SLOTS: &[(&str, &str, &str, Action)] = &[
     ("toggle_pause", "Play / pause", "space", Action::TogglePause),
-    ("seek_back", "Seek back 5s", "left", Action::SeekRelative(-5.0)),
-    ("seek_fwd", "Seek forward 5s", "right", Action::SeekRelative(5.0)),
+    ("seek_back", "Seek back (step)", "left", Action::SeekStep(false)),
+    ("seek_fwd", "Seek forward (step)", "right", Action::SeekStep(true)),
     ("volume_up", "Volume up", "up", Action::VolumeAdjust(5.0)),
     ("volume_down", "Volume down", "down", Action::VolumeAdjust(-5.0)),
     ("prev_file", "Previous file", "pageup", Action::PrevFile),
@@ -169,14 +182,18 @@ pub const KEY_SLOTS: &[(&str, &str, &str, Action)] = &[
     ("toggle_chrome", "Focus mode", "h", Action::ToggleChrome),
     ("cycle_subtitle", "Cycle subtitle track", "j", Action::CycleSubtitle),
     ("cycle_audio", "Cycle audio track", "#", Action::CycleAudio),
-    ("speed_down", "Speed down", "[", Action::SpeedAdjust(-0.1)),
-    ("speed_up", "Speed up", "]", Action::SpeedAdjust(0.1)),
+    ("speed_down", "Speed down (step)", "[", Action::SpeedStep(false)),
+    ("speed_up", "Speed up (step)", "]", Action::SpeedStep(true)),
     ("speed_reset", "Reset speed", "\\", Action::SpeedReset),
     ("toggle_sub_visibility", "Toggle subtitles", "v", Action::ToggleSubVisibility),
     ("toggle_hwdec", "Toggle hardware decode", "i", Action::ToggleHwDec),
     ("add_bookmark", "Add bookmark", "b", Action::AddBookmark),
     ("toggle_stats", "Stats overlay", "s", Action::ToggleStats),
     ("cycle_frame_mode", "Cycle frame fit", "z", Action::CycleFrameMode),
+    ("frame_step_back", "Step back one frame", ",", Action::FrameStep(false)),
+    ("frame_step_fwd", "Step forward one frame", ".", Action::FrameStep(true)),
+    ("sub_seek_prev", "Previous subtitle", "p", Action::SubSeek(false)),
+    ("sub_seek_next", "Next subtitle", "n", Action::SubSeek(true)),
 ];
 
 /// Maps every input trigger to an optional Action. `None` means the input is
@@ -195,12 +212,70 @@ pub struct Bindings {
     pub drag_window_anywhere: bool,
 }
 
+/// Preset id for each of the 4 mouse triggers - persisted instead of the
+/// raw `Action` (mirrors `KEY_SLOTS`' slot-id approach) since `Action`
+/// itself has no `PartialEq`/serialization story, and a fixed preset list
+/// is what the Mouse settings page actually offers anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTrigger {
+    SingleClick,
+    DoubleClick,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Debug, Clone)]
+pub struct MouseBindingIds {
+    pub single_click: String,
+    pub double_click: String,
+    pub scroll_up: String,
+    pub scroll_down: String,
+}
+
+impl Default for MouseBindingIds {
+    fn default() -> Self {
+        Self {
+            single_click: "none".into(),
+            double_click: "toggle_fullscreen".into(),
+            scroll_up: "volume_up_2".into(),
+            scroll_down: "volume_down_2".into(),
+        }
+    }
+}
+
+/// (preset id, display label, action). `None` action = "Unbound". Shared by
+/// all 4 mouse trigger pickers in the Settings window's Mouse category.
+pub const MOUSE_ACTION_PRESETS: &[(&str, &str, Option<Action>)] = &[
+    ("none", "Unbound", None),
+    ("toggle_pause", "Play / pause", Some(Action::TogglePause)),
+    ("toggle_mute", "Mute", Some(Action::ToggleMute)),
+    ("toggle_fullscreen", "Fullscreen", Some(Action::ToggleFullscreen)),
+    ("toggle_chrome", "Focus mode", Some(Action::ToggleChrome)),
+    ("volume_up_2", "Volume +2", Some(Action::VolumeAdjust(2.0))),
+    ("volume_down_2", "Volume -2", Some(Action::VolumeAdjust(-2.0))),
+    ("volume_up_5", "Volume +5", Some(Action::VolumeAdjust(5.0))),
+    ("volume_down_5", "Volume -5", Some(Action::VolumeAdjust(-5.0))),
+    ("seek_fwd_5", "Seek +5s", Some(Action::SeekRelative(5.0))),
+    ("seek_back_5", "Seek -5s", Some(Action::SeekRelative(-5.0))),
+    ("seek_fwd_10", "Seek +10s", Some(Action::SeekRelative(10.0))),
+    ("seek_back_10", "Seek -10s", Some(Action::SeekRelative(-10.0))),
+    ("next_file", "Next file", Some(Action::NextFile)),
+    ("prev_file", "Previous file", Some(Action::PrevFile)),
+    ("cycle_subtitle", "Cycle subtitle", Some(Action::CycleSubtitle)),
+    ("cycle_audio", "Cycle audio", Some(Action::CycleAudio)),
+    ("toggle_stats", "Stats overlay", Some(Action::ToggleStats)),
+];
+
+fn resolve_mouse_action(id: &str) -> Option<Action> {
+    MOUSE_ACTION_PRESETS.iter().find(|(pid, ..)| *pid == id).and_then(|(_, _, a)| *a)
+}
+
 impl Bindings {
     /// Build the key map from `KEY_SLOTS`, applying user overrides
     /// (slot id -> key name, keyed by `Settings.keybindings`). An override
     /// value of `""` means the slot was explicitly cleared (no key bound at
     /// all, not even the default) - see `MpvNe::apply_key_rebind`.
-    pub fn from_overrides(overrides: &HashMap<String, String>) -> Self {
+    pub fn from_overrides(overrides: &HashMap<String, String>, mouse: &MouseBindingIds) -> Self {
         let mut keys = HashMap::new();
         for (slot_id, _label, default_key, action) in KEY_SLOTS {
             let key: Option<&str> = match overrides.get(*slot_id) {
@@ -214,10 +289,10 @@ impl Bindings {
         }
         Self {
             keys,
-            single_left_click: None,
-            double_left_click: Some(Action::ToggleFullscreen),
-            scroll_up: Some(Action::VolumeAdjust(2.0)),
-            scroll_down: Some(Action::VolumeAdjust(-2.0)),
+            single_left_click: resolve_mouse_action(&mouse.single_click),
+            double_left_click: resolve_mouse_action(&mouse.double_click),
+            scroll_up: resolve_mouse_action(&mouse.scroll_up),
+            scroll_down: resolve_mouse_action(&mouse.scroll_down),
             drag_window_anywhere: true,
         }
     }
@@ -225,7 +300,7 @@ impl Bindings {
 
 impl Default for Bindings {
     fn default() -> Self {
-        Self::from_overrides(&HashMap::new())
+        Self::from_overrides(&HashMap::new(), &MouseBindingIds::default())
     }
 }
 
@@ -268,6 +343,10 @@ fn action_to_message(a: Action) -> Message {
         Action::AddBookmark => Message::AddBookmark,
         Action::ToggleStats => Message::ToggleStats,
         Action::CycleFrameMode => Message::CycleFrameMode,
+        Action::SeekStep(fwd) => Message::SeekStep(fwd),
+        Action::FrameStep(fwd) => Message::FrameStep(fwd),
+        Action::SpeedStep(faster) => Message::SpeedStep(faster),
+        Action::SubSeek(fwd) => Message::SubSeek(fwd),
     }
 }
 
@@ -323,7 +402,17 @@ pub struct MpvNe {
     /// actively capturing. Set by the Keyboard settings page's "Rebind"
     /// button; consumed by the next `InputKey` event.
     pub rebind_capture: Option<&'static str>,
+    /// Current preset id per mouse trigger - the source of truth
+    /// `bindings.{single_left_click,double_left_click,scroll_up,scroll_down}`
+    /// is rebuilt from via `Bindings::from_overrides` whenever a mouse
+    /// binding changes (`Message::SetMouseBinding`).
+    pub mouse_bindings: MouseBindingIds,
     last_left_press: Option<Instant>,
+    /// Set while click-dragging the zoomed-in video to pan it (instead of
+    /// moving the window, which is what the same drag-anywhere click zone
+    /// does at normal zoom). `(start_cursor_x, start_cursor_y, start_pan_x,
+    /// start_pan_y)` captured at drag start; deltas are applied relative to it.
+    pan_drag_start: Option<(f32, f32, f64, f64)>,
     /// Manual override - true means hide controls even when not fullscreen.
     /// Effective visibility is `chrome_visible()`; controls are hidden when
     /// in fullscreen *or* when this flag is set.
@@ -390,6 +479,13 @@ pub struct MpvNe {
     /// Whether seeking lands on the exact frame ("precise") or the nearest
     /// keyframe (faster, less exact). See `Settings::precise_seek`.
     pub precise_seek: bool,
+    /// Seconds a single seek-step covers - Left/Right keys, the transport
+    /// skip buttons, and the menu's Back/Forward items all share this.
+    /// See `Settings::playback.seek_step_secs`.
+    pub seek_step_secs: f64,
+    /// Playback-speed increment for the speed up/down keys and settings
+    /// nudge buttons. See `Settings::playback.speed_step`.
+    pub speed_step: f64,
     /// Max height yt-dlp is allowed to grab for network streams. 0 = uncapped.
     /// See `Settings::stream_quality_height`/`Player::set_stream_quality`.
     pub stream_quality_height: u32,
@@ -421,6 +517,9 @@ pub struct MpvNe {
     pub hide_all_on_minimize: bool,
     pub pause_on_focus_lost: bool,
     pub pause_on_minimize: bool,
+    /// Windows-only: minimizing the main window hides it to a tray icon
+    /// instead of the taskbar.
+    pub minimize_to_tray: bool,
     /// Tracks whether the main window was minimized as of the last poll -
     /// so hide/pause-on-minimize only fire on the transition, not every tick.
     main_window_was_minimized: bool,
@@ -466,6 +565,8 @@ pub struct MpvNe {
     pub playlist_sort_open: bool,
     /// Context menu for file entries in panels.
     pub file_context_menu: Option<FileContextMenu>,
+    /// Position of the modal text field's right-click "Paste" menu, if open.
+    pub modal_paste_menu: Option<(f32, f32)>,
     /// The floating main-menu popup: a genuine second OS window (not an
     /// in-window overlay), so it can extend past the main window's edges
     /// like a native right-click menu. `None` when closed. See
@@ -598,6 +699,12 @@ impl Default for MpvNe {
     fn default() -> Self {
         let prefs = crate::settings::Settings::load();
         set_custom_title_bar(prefs.interface.custom_title_bar);
+        let mouse_ids = MouseBindingIds {
+            single_click: prefs.interface.mouse_single_click.clone(),
+            double_click: prefs.interface.mouse_double_click.clone(),
+            scroll_up: prefs.interface.mouse_scroll_up.clone(),
+            scroll_down: prefs.interface.mouse_scroll_down.clone(),
+        };
         let mut app = Self {
             player: Player::default(),
             current_frame: None,
@@ -613,11 +720,13 @@ impl Default for MpvNe {
             playlist_idx: 0,
             bindings: Bindings {
                 drag_window_anywhere: prefs.interface.drag_anywhere,
-                ..Bindings::from_overrides(&prefs.keybindings)
+                ..Bindings::from_overrides(&prefs.keybindings, &mouse_ids)
             },
             keybinding_overrides: prefs.keybindings.clone(),
+            mouse_bindings: mouse_ids,
             rebind_capture: None,
             last_left_press: None,
+            pan_drag_start: None,
             chrome_force_hidden: false,
             cursor_pos: None,
             panel_cursor_pos: None,
@@ -652,6 +761,8 @@ impl Default for MpvNe {
             audio_lang: prefs.audio.lang.clone(),
             sub_lang: prefs.subtitles.lang.clone(),
             precise_seek: prefs.playback.precise_seek,
+            seek_step_secs: prefs.playback.seek_step_secs,
+            speed_step: prefs.playback.speed_step,
             stream_quality_height: prefs.streaming.quality_height,
             screenshot_dir: prefs.playback.screenshot_dir.clone(),
             snap_to_edge: prefs.interface.snap_to_edge,
@@ -664,6 +775,7 @@ impl Default for MpvNe {
             hide_all_on_minimize: prefs.interface.hide_all_on_minimize,
             pause_on_focus_lost: prefs.interface.pause_on_focus_lost,
             pause_on_minimize: prefs.interface.pause_on_minimize,
+            minimize_to_tray: prefs.interface.minimize_to_tray,
             main_window_was_minimized: false,
             auto_load_siblings: prefs.interface.auto_load_siblings,
             single_instance: prefs.interface.single_instance,
@@ -687,6 +799,7 @@ impl Default for MpvNe {
             popup_anchor_x: 0.0,
             playlist_sort_open: false,
             file_context_menu: None,
+            modal_paste_menu: None,
             menu_window_id: None,
             menu_section_open: [false, false],
             menu_anchor: None,
@@ -783,6 +896,8 @@ pub enum Message {
     SubTracksChanged(Vec<crate::player::SubTrack>),
     CurrentSidChanged(i64),
     SubTrackSelected(crate::player::SubTrack),
+    CurrentSecondarySidChanged(i64),
+    SecondarySubTrackSelected(crate::player::SubTrack),
     ChaptersChanged(Vec<crate::player::Chapter>),
     AudioTracksChanged(Vec<crate::player::AudioTrack>),
     CurrentAidChanged(i64),
@@ -830,8 +945,19 @@ pub enum Message {
     ToggleHideAllOnMinimize,
     TogglePauseOnFocusLost,
     TogglePauseOnMinimize,
+    ToggleMinimizeToTray,
+    /// Windows-only: polls for a taskbar thumbnail button click (previous/
+    /// play-pause/next) - see `win32_modal::take_pending_thumb_action`.
+    PollThumbBar,
     ToggleAutoLoadSiblings,
     ToggleSingleInstance,
+    /// Windows-only: register MPV-NE as an "Open with" candidate for its
+    /// supported media extensions, then open Windows' own Default Apps
+    /// settings so the user can pick it - see `win32_modal::register_file_associations`.
+    RegisterFileAssociations,
+    /// Change one of the 4 mouse triggers to a different preset - see
+    /// `MOUSE_ACTION_PRESETS`/`MouseTrigger`.
+    SetMouseBinding(MouseTrigger, &'static str),
     /// Windows-only: polls for a file path forwarded from a newer launch -
     /// see `win32_modal::take_pending_open_file`.
     PollSingleInstance,
@@ -842,6 +968,10 @@ pub enum Message {
     AudioLangInput(String),
     SubLangInput(String),
     TogglePreciseSeek,
+    SeekStepAdjust(f64),
+    SeekStepSet(f64),
+    SpeedStepAdjust(f64),
+    SpeedStepSet(f64),
     StreamQualitySet(u32),
     FitToVisible,
     FitToScale(f32),
@@ -915,6 +1045,11 @@ pub enum Message {
     PlaylistLoaded(Vec<std::path::PathBuf>),
     OpenModal(ModalKind),
     ModalInput(String),
+    /// Right-click on the modal text field: open a small "Paste" menu at
+    /// the cursor, rather than pasting silently - a right-click with no
+    /// visible response was easy to miss existed at all.
+    ModalRightClick,
+    CloseModalPasteMenu,
     ModalPasteRequest,
     ModalPasteResult(Option<String>),
     ModalConfirm,
@@ -1030,6 +1165,14 @@ pub enum Message {
     SubFontSizeChanged(i64),
     SubPosChanged(i64),
     SeekRelative(f64),
+    /// Seek by the configurable step size, forward if `true`.
+    SeekStep(bool),
+    /// Step exactly one video frame, forward if `true`.
+    FrameStep(bool),
+    /// Adjust speed by the configurable step size, faster if `true`.
+    SpeedStep(bool),
+    /// Seek to the start of the next/previous subtitle line, forward if `true`.
+    SubSeek(bool),
     VolumeAdjust(f64),
     #[allow(dead_code)]
     FileDropped(std::path::PathBuf),
@@ -1041,6 +1184,7 @@ pub enum Message {
     /// `captured` is true when a widget already handled the click. Edge-grip
     /// resize fires regardless; other actions only fire when !captured.
     InputMouseDown(iced::window::Id, iced::mouse::Button, bool),
+    InputMouseUp(iced::window::Id, iced::mouse::Button),
     InputScroll(iced::window::Id, f32),
     ModifiersChanged(iced::keyboard::Modifiers),
     /// Carries the source window's id so the handler can ignore movement
@@ -1102,8 +1246,26 @@ impl MpvNe {
         };
         let icon = app_icon();
 
+        // `w, h` are saved PHYSICAL pixels; convert to logical using the
+        // target monitor's real DPI scale *before* creating the window, so
+        // it opens at the correct size immediately - guessing 100% scale
+        // here (as before) left a window where the controls bar laid out
+        // at the wrong size and looked visibly broken until the later
+        // async correction resize landed.
+        #[cfg(target_os = "windows")]
+        let initial_scale = {
+            let query_pos = match position {
+                iced::window::Position::Specific(p) => Some((p.x as i32, p.y as i32)),
+                _ => None,
+            };
+            crate::win32_modal::dpi_scale_near(query_pos)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let initial_scale: f32 = 1.0;
+        let (logical_w, logical_h) = (w / initial_scale, h / initial_scale);
+
         let settings = iced::window::Settings {
-            size: iced::Size::new(w, h),
+            size: iced::Size::new(logical_w, logical_h),
             position,
             min_size: Some(iced::Size::new(360.0, 160.0)),
             decorations: !use_custom_title_bar(),
@@ -1113,11 +1275,10 @@ impl MpvNe {
         };
         let (id, open_task) = iced::window::open(settings);
         app.window_id = Some(id);
-        // The size requested above was a guess in logical pixels (the real
-        // DPI scale factor isn't known until the window exists), correct
-        // for anything other than 100% scale. Live-query the factor the
-        // same way the (confirmed-correct) Fit menu does, rather than
-        // trusting the Rescaled *event*, which wasn't reliable enough.
+        // Safety net in case the pre-query above didn't match the DPI iced
+        // actually opened the window at (e.g. non-Windows, or the OS placed
+        // a "Centered" window on a different monitor than we assumed) -
+        // corrects it again against the live, authoritative scale factor.
         let physical = (w, h);
         let correct_size = open_task.then(move |id| {
             iced::window::scale_factor(id).then(move |dpi| {
@@ -1132,6 +1293,14 @@ impl MpvNe {
         }
         if app.auto_update_ytdlp {
             startup_tasks.push(Task::perform(download_ytdlp(), Message::YtdlpDownloadResult));
+        }
+        // A file/URL passed on the command line (double-clicked via a file
+        // association, or "Open with") - single-instance mode's handoff
+        // path exits before ever reaching here, so this only fires for a
+        // genuinely new process. `FileSelected` reuses the same path as
+        // manually picking a file via the Open dialog.
+        if let Some(arg) = std::env::args().nth(1) {
+            startup_tasks.push(Task::done(Message::FileSelected(Some(arg))));
         }
         (app, Task::batch(startup_tasks))
     }
@@ -1306,6 +1475,8 @@ impl MpvNe {
                                 volume: self.player.volume,
                                 precise_seek: self.precise_seek,
                                 screenshot_dir: self.screenshot_dir.clone(),
+                                seek_step_secs: self.seek_step_secs,
+                                speed_step: self.speed_step,
                             },
                             audio: crate::settings::AudioSettings {
                                 normalize: self.audio_normalize,
@@ -1333,6 +1504,11 @@ impl MpvNe {
                                 pause_on_minimize: self.pause_on_minimize,
                                 auto_load_siblings: self.auto_load_siblings,
                                 single_instance: self.single_instance,
+                                minimize_to_tray: self.minimize_to_tray,
+                                mouse_single_click: self.mouse_bindings.single_click.clone(),
+                                mouse_double_click: self.mouse_bindings.double_click.clone(),
+                                mouse_scroll_up: self.mouse_bindings.scroll_up.clone(),
+                                mouse_scroll_down: self.mouse_bindings.scroll_down.clone(),
                             },
                             keybindings: self.keybinding_overrides.clone(),
                         }
@@ -1802,6 +1978,11 @@ impl MpvNe {
             Message::PauseChanged(p) => {
                 tracing::debug!(paused = p, pos = self.player.position, dur = self.player.duration, "PauseChanged");
                 self.player.paused = p;
+                #[cfg(target_os = "windows")]
+                {
+                    crate::win32_modal::update_thumbbar_playpause(p);
+                    crate::win32_modal::update_smtc_playback(p);
+                }
             }
 
             Message::FrameReady(pixels, w, h) => {
@@ -1832,6 +2013,12 @@ impl MpvNe {
             Message::SubVisibleChanged(v) => self.player.sub_visible = v,
             Message::SubTracksChanged(list) => self.player.sub_tracks = list,
             Message::CurrentSidChanged(id) => self.player.current_sid = id,
+            Message::CurrentSecondarySidChanged(id) => self.player.current_secondary_sid = id,
+            Message::SecondarySubTrackSelected(track) => {
+                self.player.set_secondary_sub_track(track.id);
+                self.subs_menu_open = false;
+                return Task::done(Message::ShowOsd(format!("Secondary subtitles  {}", track.label)));
+            }
             Message::ChaptersChanged(list) => self.player.chapters = list,
             Message::SubTrackSelected(track) => {
                 self.player.set_sub_track(track.id);
@@ -1891,6 +2078,11 @@ impl MpvNe {
                 self.player.set_speed(new_speed);
             }
             Message::SpeedReset => self.player.set_speed(1.0),
+            Message::SpeedStep(faster) => {
+                let delta = if faster { self.speed_step } else { -self.speed_step };
+                return Task::done(Message::SpeedAdjust(delta));
+            }
+            Message::SubSeek(forward) => self.player.sub_seek(forward),
             Message::ShowOsd(msg) => {
                 if !self.osd_enabled {
                     return Task::none();
@@ -2136,9 +2328,18 @@ impl MpvNe {
                     |f| match f {
                         Some(h) => {
                             let content = std::fs::read_to_string(h.path()).unwrap_or_default();
-                            let paths: Vec<_> = content.lines()
-                                .filter(|l| !l.starts_with('#') && !l.is_empty())
-                                .map(|l| l.trim())
+                            let is_pls = h.path().extension()
+                                .and_then(|e| e.to_str())
+                                .is_some_and(|e| e.eq_ignore_ascii_case("pls"));
+                            let entries: Vec<String> = if is_pls {
+                                parse_pls(&content)
+                            } else {
+                                content.lines()
+                                    .filter(|l| !l.starts_with('#') && !l.is_empty())
+                                    .map(|l| l.trim().to_string())
+                                    .collect()
+                            };
+                            let paths: Vec<_> = entries.into_iter()
                                 // Keep URL entries unconditionally (they never
                                 // "exist" as a local path) - only filesystem
                                 // paths need the exists() check to drop stale
@@ -2189,7 +2390,16 @@ impl MpvNe {
             Message::ModalInput(s) => {
                 if let Some(m) = &mut self.modal { m.input = s; }
             }
+            Message::ModalRightClick => {
+                if self.modal.is_some() {
+                    self.modal_paste_menu = self.cursor_pos;
+                }
+            }
+            Message::CloseModalPasteMenu => {
+                self.modal_paste_menu = None;
+            }
             Message::ModalPasteRequest => {
+                self.modal_paste_menu = None;
                 if self.modal.is_some() {
                     return iced::clipboard::read().map(Message::ModalPasteResult);
                 }
@@ -2199,6 +2409,7 @@ impl MpvNe {
             }
             Message::ModalPasteResult(None) => {}
             Message::ModalConfirm => {
+                self.modal_paste_menu = None;
                 if let Some(m) = self.modal.take() {
                     match m.kind {
                         ModalKind::JumpToTime => {
@@ -2253,7 +2464,10 @@ impl MpvNe {
                     }
                 }
             }
-            Message::ModalCancel => { self.modal = None; }
+            Message::ModalCancel => {
+                self.modal = None;
+                self.modal_paste_menu = None;
+            }
             Message::NextChapter => {
                 if !self.player.chapters.is_empty() {
                     self.player.seek_chapter(1);
@@ -2632,6 +2846,9 @@ impl MpvNe {
             }
             Message::VideoZoomReset => {
                 self.player.set_video_zoom(0.0);
+                self.player.set_video_pan(0.0, 0.0);
+                self.player.video_pan_x = 0.0;
+                self.player.video_pan_y = 0.0;
             }
             Message::VideoZoomChanged(v) => self.player.video_zoom = v,
             Message::CacheTimeChanged(v) => self.player.cache_time = v,
@@ -3082,6 +3299,12 @@ impl MpvNe {
                 prefs.interface.pause_on_minimize = self.pause_on_minimize;
                 prefs.save();
             }
+            Message::ToggleMinimizeToTray => {
+                self.minimize_to_tray = !self.minimize_to_tray;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.minimize_to_tray = self.minimize_to_tray;
+                prefs.save();
+            }
             Message::ToggleAutoLoadSiblings => {
                 self.auto_load_siblings = !self.auto_load_siblings;
                 let mut prefs = crate::settings::Settings::load();
@@ -3101,6 +3324,37 @@ impl MpvNe {
                     else { "Restart to allow multiple instances again".into() }
                 ));
             }
+            Message::RegisterFileAssociations => {
+                #[cfg(target_os = "windows")]
+                {
+                    let ok = crate::win32_modal::register_file_associations();
+                    crate::win32_modal::open_default_apps_settings();
+                    return Task::done(Message::ShowOsd(
+                        if ok { "Registered - pick MPV-NE in the Default Apps settings that just opened".into() }
+                        else { "Couldn't register file associations".into() }
+                    ));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    return Task::done(Message::ShowOsd("Not supported on this platform yet".into()));
+                }
+            }
+            Message::SetMouseBinding(trigger, preset_id) => {
+                let field = match trigger {
+                    MouseTrigger::SingleClick => &mut self.mouse_bindings.single_click,
+                    MouseTrigger::DoubleClick => &mut self.mouse_bindings.double_click,
+                    MouseTrigger::ScrollUp => &mut self.mouse_bindings.scroll_up,
+                    MouseTrigger::ScrollDown => &mut self.mouse_bindings.scroll_down,
+                };
+                *field = preset_id.to_string();
+                self.rebuild_bindings();
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.mouse_single_click = self.mouse_bindings.single_click.clone();
+                prefs.interface.mouse_double_click = self.mouse_bindings.double_click.clone();
+                prefs.interface.mouse_scroll_up = self.mouse_bindings.scroll_up.clone();
+                prefs.interface.mouse_scroll_down = self.mouse_bindings.scroll_down.clone();
+                prefs.save();
+            }
             #[cfg(target_os = "windows")]
             Message::PollSingleInstance => {
                 if let Some(path) = crate::win32_modal::take_pending_open_file() {
@@ -3111,6 +3365,18 @@ impl MpvNe {
             }
             #[cfg(not(target_os = "windows"))]
             Message::PollSingleInstance => {}
+            #[cfg(target_os = "windows")]
+            Message::PollThumbBar => {
+                if let Some(action) = crate::win32_modal::take_pending_thumb_action() {
+                    return Task::done(match action {
+                        0 => Message::PrevFile,
+                        2 => Message::NextFile,
+                        _ => Message::TogglePause,
+                    });
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            Message::PollThumbBar => {}
             Message::MinimizeCheckTick => {
                 #[cfg(target_os = "windows")]
                 {
@@ -3119,6 +3385,9 @@ impl MpvNe {
                         self.main_window_was_minimized = true;
                         if self.pause_on_minimize && !self.player.paused {
                             self.player.pause();
+                        }
+                        if self.minimize_to_tray {
+                            crate::win32_modal::minimize_to_tray();
                         }
                         if self.hide_all_on_minimize {
                             let mut tasks = Vec::new();
@@ -3237,6 +3506,30 @@ impl MpvNe {
                 prefs.playback.precise_seek = self.precise_seek;
                 prefs.save();
             }
+            Message::SeekStepAdjust(delta) => {
+                self.seek_step_secs = (self.seek_step_secs + delta).clamp(1.0, 60.0);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.playback.seek_step_secs = self.seek_step_secs;
+                prefs.save();
+            }
+            Message::SeekStepSet(secs) => {
+                self.seek_step_secs = secs.clamp(1.0, 60.0);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.playback.seek_step_secs = self.seek_step_secs;
+                prefs.save();
+            }
+            Message::SpeedStepAdjust(delta) => {
+                self.speed_step = (self.speed_step + delta).clamp(0.05, 1.0);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.playback.speed_step = self.speed_step;
+                prefs.save();
+            }
+            Message::SpeedStepSet(step) => {
+                self.speed_step = step.clamp(0.05, 1.0);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.playback.speed_step = self.speed_step;
+                prefs.save();
+            }
             Message::StreamQualitySet(height) => {
                 self.stream_quality_height = height;
                 self.player.set_stream_quality(height);
@@ -3302,6 +3595,19 @@ impl MpvNe {
                 self.live_edge_paused = false;
                 self.player.seek_relative(delta);
             }
+            Message::SeekStep(forward) => {
+                self.live_catching_up = false;
+                self.live_edge_paused = false;
+                let delta = if forward { self.seek_step_secs } else { -self.seek_step_secs };
+                self.player.seek_relative(delta);
+            }
+            Message::FrameStep(forward) => {
+                if forward {
+                    self.player.frame_step();
+                } else {
+                    self.player.frame_back_step();
+                }
+            }
             Message::JumpToLive => {
                 if self.player.duration < 1.0 {
                     tracing::warn!(
@@ -3342,6 +3648,15 @@ impl MpvNe {
             Message::CursorMoved(id, x, y) => {
                 if Some(id) == self.window_id {
                     self.cursor_pos = Some((x, y));
+                    if let Some((start_x, start_y, start_pan_x, start_pan_y)) = self.pan_drag_start {
+                        let w = (self.window_w_logical - if self.active_panel.is_some() { PANEL_W } else { 0.0 }).max(1.0);
+                        let h = (self.window_h_logical - TOP_BAR_H as f32 - CONTROLS_H as f32).max(1.0);
+                        let new_x = (start_pan_x + ((x - start_x) / w) as f64).clamp(-1.5, 1.5);
+                        let new_y = (start_pan_y + ((y - start_y) / h) as f64).clamp(-1.5, 1.5);
+                        self.player.set_video_pan(new_x, new_y);
+                        self.player.video_pan_x = new_x;
+                        self.player.video_pan_y = new_y;
+                    }
                 } else if Some(id) == self.panel_window_id {
                     self.panel_cursor_pos = Some((x, y));
                 } else if Some(id) == self.app_settings_window_id {
@@ -3355,6 +3670,11 @@ impl MpvNe {
                     self.panel_cursor_pos = None;
                 } else if Some(id) == self.app_settings_window_id {
                     self.app_settings_cursor_pos = None;
+                }
+            }
+            Message::InputMouseUp(_id, button) => {
+                if button == iced::mouse::Button::Left {
+                    self.pan_drag_start = None;
                 }
             }
             Message::WindowUnfocused(id) => {
@@ -3417,6 +3737,10 @@ impl MpvNe {
                 }
                 if name == "escape" && self.file_context_menu.is_some() {
                     self.file_context_menu = None;
+                    return Task::none();
+                }
+                if name == "escape" && self.modal_paste_menu.is_some() {
+                    self.modal_paste_menu = None;
                     return Task::none();
                 }
                 if name == "escape" && self.menu_window_id.is_some() {
@@ -3518,6 +3842,24 @@ impl MpvNe {
                             }
                             if let Some(action) = self.bindings.double_left_click {
                                 return Task::done(action_to_message(action));
+                            }
+                        }
+                        // Zoomed in: click-drag over the video pans it instead
+                        // of moving the window (takes priority over
+                        // drag_window_anywhere, and works regardless of
+                        // whether that setting is on).
+                        if self.player.video_zoom != 0.0 {
+                            let over_video = self.cursor_pos.map(|(x, y)| {
+                                let controls_top = self.window_h_logical - CONTROLS_H as f32;
+                                let panel_left = self.window_w_logical
+                                    - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                                y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
+                            }).unwrap_or(false);
+                            if over_video {
+                                if let Some((x, y)) = self.cursor_pos {
+                                    self.pan_drag_start = Some((x, y, self.player.video_pan_x, self.player.video_pan_y));
+                                }
+                                return Task::none();
                             }
                         }
                         let in_drag_zone = if self.bindings.drag_window_anywhere && !self.fullscreen {
@@ -3673,7 +4015,7 @@ impl MpvNe {
         let drag_window_anywhere = self.bindings.drag_window_anywhere;
         self.bindings = Bindings {
             drag_window_anywhere,
-            ..Bindings::from_overrides(&self.keybinding_overrides)
+            ..Bindings::from_overrides(&self.keybinding_overrides, &self.mouse_bindings)
         };
     }
 
@@ -3927,6 +4269,11 @@ impl MpvNe {
         let pb = std::path::PathBuf::from(&path);
         self.recent_files.record(&pb);
         self.recent_files.save();
+        #[cfg(target_os = "windows")]
+        {
+            let name = pb.file_name().and_then(|n| n.to_str()).unwrap_or(&path).to_string();
+            crate::win32_modal::update_smtc_metadata(&name);
+        }
         self.player.open(path);
     }
 
@@ -3998,6 +4345,9 @@ impl MpvNe {
         };
 
         crate::win32_modal::install(on_enter, on_exit);
+        crate::win32_modal::install_tray();
+        crate::win32_modal::install_thumbbar();
+        crate::win32_modal::install_smtc();
     }
 
     pub fn theme(&self, _window: iced::window::Id) -> Theme {
@@ -4063,7 +4413,7 @@ impl MpvNe {
         // iced event for it (see `win32_modal::is_main_window_minimized`).
         // Only runs when a preference that cares about it is on.
         #[cfg(target_os = "windows")]
-        if self.hide_all_on_minimize || self.pause_on_minimize {
+        if self.hide_all_on_minimize || self.pause_on_minimize || self.minimize_to_tray {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(400))
                     .map(|_| Message::MinimizeCheckTick),
@@ -4078,6 +4428,13 @@ impl MpvNe {
                     .map(|_| Message::PollSingleInstance),
             );
         }
+        // Poll for taskbar thumbnail button clicks - always on (Windows only,
+        // negligible cost, and the buttons exist regardless of other settings).
+        #[cfg(target_os = "windows")]
+        subs.push(
+            iced::time::every(std::time::Duration::from_millis(150))
+                .map(|_| Message::PollThumbBar),
+        );
         Subscription::batch(subs)
     }
 }
@@ -4294,6 +4651,27 @@ fn win32_is_maximized(window_id: Option<iced::window::Id>) -> bool {
     unsafe { IsZoomed(GetForegroundWindow()) != 0 }
 }
 
+/// Parse a `.pls` playlist (INI-style: `File1=`, `Title1=`, `Length1=`,
+/// `NumberOfEntries=`, `[playlist]` header) into an ordered list of
+/// path/URL strings - the same shape a `.m3u`'s lines already produce, so
+/// both feed the same downstream filtering in `Message::LoadPlaylist`.
+fn parse_pls(content: &str) -> Vec<String> {
+    let mut entries: Vec<(u32, String)> = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("File") else { continue };
+        let Some(eq) = rest.find('=') else { continue };
+        let (idx_str, value) = rest.split_at(eq);
+        let Ok(idx) = idx_str.parse::<u32>() else { continue };
+        let value = value[1..].trim(); // skip the '='
+        if !value.is_empty() {
+            entries.push((idx, value.to_string()));
+        }
+    }
+    entries.sort_by_key(|(idx, _)| *idx);
+    entries.into_iter().map(|(_, v)| v).collect()
+}
+
 const MEDIA_EXTS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "flv", "wmv", "ts",
     "mp3", "flac", "ogg", "wav", "aac", "opus",
@@ -4468,6 +4846,9 @@ fn on_window_event(
             let captured = matches!(status, iced::event::Status::Captured);
             Some(Message::InputMouseDown(id, button, captured))
         }
+        Event::Mouse(iced::mouse::Event::ButtonReleased(button)) => {
+            Some(Message::InputMouseUp(id, button))
+        }
         Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
             // A modern mouse can report movement hundreds of times a second;
             // each one triggers a full app rebuild (this app's view() has no
@@ -4562,6 +4943,7 @@ fn mpv_stream(key: &StreamKey) -> BoxStream<'static, Message> {
         PlayerEvent::SubVisible(v) => Message::SubVisibleChanged(v),
         PlayerEvent::SubTracks(list) => Message::SubTracksChanged(list),
         PlayerEvent::CurrentSid(id) => Message::CurrentSidChanged(id),
+        PlayerEvent::CurrentSecondarySid(id) => Message::CurrentSecondarySidChanged(id),
         PlayerEvent::Chapters(list) => Message::ChaptersChanged(list),
         PlayerEvent::AudioTracks(list) => Message::AudioTracksChanged(list),
         PlayerEvent::CurrentAid(id) => Message::CurrentAidChanged(id),

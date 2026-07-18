@@ -35,10 +35,15 @@ struct AppSettingsSnapshot {
     pause_on_minimize: bool,
     auto_load_siblings: bool,
     single_instance: bool,
+    minimize_to_tray: bool,
     /// Resolved key per `KEY_SLOTS` entry, in the same order - `None` means
     /// that slot is explicitly unbound.
     keybind_keys: Vec<Option<String>>,
     rebind_capture: Option<&'static str>,
+    mouse_single_click: String,
+    mouse_double_click: String,
+    mouse_scroll_up: String,
+    mouse_scroll_down: String,
 }
 
 impl AppSettingsSnapshot {
@@ -59,10 +64,15 @@ impl AppSettingsSnapshot {
             pause_on_minimize: app.pause_on_minimize,
             auto_load_siblings: app.auto_load_siblings,
             single_instance: app.single_instance,
+            minimize_to_tray: app.minimize_to_tray,
             keybind_keys: KEY_SLOTS.iter()
                 .map(|(id, ..)| app.resolved_key_for_slot(id))
                 .collect(),
             rebind_capture: app.rebind_capture,
+            mouse_single_click: app.mouse_bindings.single_click.clone(),
+            mouse_double_click: app.mouse_bindings.double_click.clone(),
+            mouse_scroll_up: app.mouse_bindings.scroll_up.clone(),
+            mouse_scroll_down: app.mouse_bindings.scroll_down.clone(),
         }
     }
 }
@@ -149,6 +159,7 @@ fn nav(app: &MpvNe) -> Element<'_, Message> {
     const ITEMS: &[(&str, AppSettingsCategory)] = &[
         ("Interface", AppSettingsCategory::Interface),
         ("Keyboard", AppSettingsCategory::Keyboard),
+        ("Mouse", AppSettingsCategory::Mouse),
     ];
 
     let buttons: Vec<Element<'_, Message>> = ITEMS
@@ -197,6 +208,13 @@ fn content(app: &MpvNe) -> Element<'_, Message> {
                 .padding(20)
                 .into()
         }
+        AppSettingsCategory::Mouse => {
+            container(mouse_category(snap))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(20)
+                .into()
+        }
     }})
     .into()
 }
@@ -215,6 +233,7 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         toggle_row("Hide all windows when minimized", Some("Minimize the detached panel and Settings windows together with the main window"), app.hide_all_on_minimize, Message::ToggleHideAllOnMinimize),
         toggle_row("Pause when window loses focus", None, app.pause_on_focus_lost, Message::TogglePauseOnFocusLost),
         toggle_row("Pause when minimized", None, app.pause_on_minimize, Message::TogglePauseOnMinimize),
+        toggle_row("Minimize to system tray", Some("Minimizing hides the window to a tray icon instead of the taskbar"), app.minimize_to_tray, Message::ToggleMinimizeToTray),
         toggle_row("Auto-load folder as playlist", Some("Queue other media files from the same folder when opening a file"), app.auto_load_siblings, Message::ToggleAutoLoadSiblings),
         toggle_row("Single instance", Some("Opening another file hands it off to the running window instead of starting a new one - requires restart"), app.single_instance, Message::ToggleSingleInstance),
     ]
@@ -234,6 +253,12 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
                 border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
                 ..Default::default()
             }),
+        gap(),
+        settings_section(
+            "File associations",
+            "Register MPV-NE as an option in \"Open with\", then pick it as default in the Windows settings that open",
+            action_btn("Register file associations", Message::RegisterFileAssociations, AURORA_TEAL),
+        ),
     ]
     .spacing(0)
     .into()
@@ -241,6 +266,28 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
 
 fn gap<'a>() -> Element<'a, Message> {
     Space::new().height(Length::Fixed(10.0)).width(Length::Fill).into()
+}
+
+/// A boxed section with a label, a small muted explanation line, and
+/// arbitrary content below - used for things that aren't a plain toggle
+/// (e.g. an action button) so they don't have to squeeze into `toggle_row`.
+fn settings_section(label: &'static str, subtext: &'static str, content: Element<'static, Message>) -> Element<'static, Message> {
+    container(
+        column![
+            text(label).size(12).color(TEXT_BRIGHT),
+            text(subtext).size(10).color(TEXT_MUTED),
+            content,
+        ]
+        .spacing(8),
+    )
+    .padding([12, 14])
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(BG_SURFACE)),
+        border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
+        ..Default::default()
+    })
+    .into()
 }
 
 /// One compact row: label (+ optional muted note) on the left, a small
@@ -416,6 +463,77 @@ fn keybind_row(
 }
 
 /// Friendlier display for a few key names that read awkwardly raw.
+fn mouse_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
+    use crate::app::{MouseTrigger, MOUSE_ACTION_PRESETS};
+
+    let row_for = |label: &'static str, trigger: MouseTrigger, current_id: &str| -> Element<'static, Message> {
+        let options: Vec<&'static str> = MOUSE_ACTION_PRESETS.iter().map(|(_, label, _)| *label).collect();
+        let current_label = MOUSE_ACTION_PRESETS.iter()
+            .find(|(id, ..)| *id == current_id)
+            .map(|(_, label, _)| *label)
+            .unwrap_or("Unbound");
+
+        let picker = iced::widget::pick_list(
+            options,
+            Some(current_label),
+            move |chosen_label: &'static str| {
+                let id = MOUSE_ACTION_PRESETS.iter()
+                    .find(|(_, label, _)| *label == chosen_label)
+                    .map(|(id, ..)| *id)
+                    .unwrap_or("none");
+                Message::SetMouseBinding(trigger, id)
+            },
+        )
+        .text_size(12)
+        .padding([5, 10])
+        .width(Length::Fixed(150.0));
+
+        container(
+            row![
+                text(label).size(12).color(TEXT_BRIGHT),
+                Space::new().width(Length::Fill),
+                picker,
+            ]
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
+        )
+        .padding([9, 14])
+        .width(Length::Fill)
+        .style(|_| container::Style {
+            border: iced::Border { color: BG_DEEPEST, width: 1.0, radius: iced::border::Radius::new(0.0) },
+            ..Default::default()
+        })
+        .into()
+    };
+
+    let rows = column![
+        row_for("Single click", MouseTrigger::SingleClick, &app.mouse_single_click),
+        row_for("Double click", MouseTrigger::DoubleClick, &app.mouse_double_click),
+        row_for("Scroll up", MouseTrigger::ScrollUp, &app.mouse_scroll_up),
+        row_for("Scroll down", MouseTrigger::ScrollDown, &app.mouse_scroll_down),
+    ]
+    .spacing(0)
+    .width(Length::Fill);
+
+    column![
+        text("Mouse").size(16).color(TEXT_BRIGHT),
+        text("What each mouse action does when clicked/scrolled over the video.")
+            .size(12)
+            .color(TEXT_MUTED),
+        gap(),
+        container(rows)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(BG_SURFACE)),
+                border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
+                ..Default::default()
+            }),
+    ]
+    .spacing(0)
+    .width(Length::Fill)
+    .into()
+}
+
 fn display_key(key: &str) -> String {
     match key {
         "space" => "Space".into(),

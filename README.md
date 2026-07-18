@@ -115,21 +115,15 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 - Visual effects and animations
 - Customisable button layout
 - Mini player mode + audio spectrum visualizer (built, not yet merged)
-- Pan and scan with mouse drag
 - Jump to next / previous subtitle
-- Secondary subtitle track
 - Speed step customisation
-- Richer playlist formats (import .pls/.m3u/etc., not just export)
-- File associations (register as default player)
-- Frame-by-frame stepping
-- Configurable seek step size
-- Minimize to system tray
-- Windows: system media transport controls (media-key/lock-screen integration), taskbar thumbnail buttons
+- 3D/VR video support - stereoscopic format conversion (SBS/OU → anaglyph or single-eye) and 180°/360° projection unwrap with click-drag panning
+- GPU zero-copy rendering (native mpv OpenGL/D3D11 render API + wgpu interop) to cut CPU/GPU frame round-tripping at high resolutions like 4K
 - Linux and macOS support (untested)
 
 ## Version
 
-0.4.0 - see [CHANGELOG](CHANGELOG.md)
+0.4.5 - see [CHANGELOG](CHANGELOG.md)
 
 ## Licence
 

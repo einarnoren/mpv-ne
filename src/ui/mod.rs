@@ -111,8 +111,8 @@ pub fn fmt_duration(secs: f64) -> String {
 }
 
 /// Styled context-menu row shared by the video right-click menu.
-fn ctx_menu_item<'a>(label: &'static str, msg: Message) -> Element<'a, Message> {
-    button(text(label).size(12).color(TEXT_BRIGHT))
+fn ctx_menu_item<'a>(label: impl ToString, msg: Message) -> Element<'a, Message> {
+    button(text(label.to_string()).size(12).color(TEXT_BRIGHT))
         .padding([7, 14])
         .width(Length::Fill)
         .style(|_, status| {
@@ -173,7 +173,7 @@ fn ctx_menu_header<'a>(label: &'static str, idx: usize, open: bool) -> Element<'
 /// built once and shared between rendering and height estimation (see
 /// `menu_window_height` in app.rs) - keeps them from drifting out of sync.
 enum MenuRow {
-    Item(&'static str, Message),
+    Item(String, Message),
     Divider,
     /// Collapsible section header. `idx` indexes `MpvNe::menu_section_open`.
     Header(&'static str, usize),
@@ -195,6 +195,10 @@ struct MenuSnapshot {
     chrome_force_hidden: bool,
     pinned: bool,
     pip_active: bool,
+    /// `seek_step_secs.to_bits()` - f64 doesn't derive Hash, and the label
+    /// text needs the real value, so this stores it losslessly rather than
+    /// rounding to an integer.
+    seek_step_bits: u64,
 }
 
 impl MenuSnapshot {
@@ -209,7 +213,12 @@ impl MenuSnapshot {
             chrome_force_hidden: app.chrome_force_hidden,
             pinned: app.pinned,
             pip_active: app.pip_active,
+            seek_step_bits: app.seek_step_secs.to_bits(),
         }
+    }
+
+    fn seek_step_secs(&self) -> f64 {
+        f64::from_bits(self.seek_step_bits)
     }
 }
 
@@ -221,18 +230,18 @@ fn menu_rows(app: &MenuSnapshot) -> Vec<MenuRow> {
     let has_media = app.has_media;
     let mut rows = Vec::new();
 
-    rows.push(Item("Open file(s)…", Message::VideoMenuAction(Box::new(Message::OpenFile))));
-    rows.push(Item("Open URL / stream…", Message::VideoMenuAction(Box::new(Message::OpenUrl))));
-    rows.push(Item("Add URL to playlist…", Message::VideoMenuAction(Box::new(
+    rows.push(Item("Open file(s)…".to_string(), Message::VideoMenuAction(Box::new(Message::OpenFile))));
+    rows.push(Item("Open URL / stream…".to_string(), Message::VideoMenuAction(Box::new(Message::OpenUrl))));
+    rows.push(Item("Add URL to playlist…".to_string(), Message::VideoMenuAction(Box::new(
         Message::OpenModal(crate::app::ModalKind::AddPlaylistUrl)
     ))));
-    rows.push(Item("Playlist", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
-    rows.push(Item("Browse files", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
-    rows.push(Item("Recent", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
+    rows.push(Item("Playlist".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
+    rows.push(Item("Browse files".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
+    rows.push(Item("Recent".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
     let private_label = if app.private_mode { "Exit private mode" } else { "Private mode (no history)" };
-    rows.push(Item(private_label, Message::VideoMenuAction(Box::new(Message::TogglePrivateMode))));
+    rows.push(Item(private_label.to_string(), Message::VideoMenuAction(Box::new(Message::TogglePrivateMode))));
     if has_media {
-        rows.push(Item("Stop", Message::VideoMenuAction(Box::new(Message::Stop))));
+        rows.push(Item("Stop".to_string(), Message::VideoMenuAction(Box::new(Message::Stop))));
     }
     rows.push(Divider);
 
@@ -240,43 +249,45 @@ fn menu_rows(app: &MenuSnapshot) -> Vec<MenuRow> {
         rows.push(Header("Playback", 0));
         if app.menu_section_open[0] {
             let play_label = if app.paused { "Play" } else { "Pause" };
-            rows.push(Item(play_label, Message::VideoMenuAction(Box::new(Message::TogglePause))));
-            rows.push(Item("Previous file", Message::VideoMenuAction(Box::new(Message::PrevFile))));
-            rows.push(Item("Next file", Message::VideoMenuAction(Box::new(Message::NextFile))));
-            rows.push(Item("Back 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(-10.0)))));
-            rows.push(Item("Forward 10 s", Message::VideoMenuAction(Box::new(Message::SeekRelative(10.0)))));
-            rows.push(Item("Set A-B loop point A", Message::VideoMenuAction(Box::new(Message::AbLoopSetA))));
-            rows.push(Item("Set A-B loop point B", Message::VideoMenuAction(Box::new(Message::AbLoopSetB))));
-            rows.push(Item("Clear A-B loop", Message::VideoMenuAction(Box::new(Message::AbLoopClear))));
+            rows.push(Item(play_label.to_string(), Message::VideoMenuAction(Box::new(Message::TogglePause))));
+            rows.push(Item("Previous file".to_string(), Message::VideoMenuAction(Box::new(Message::PrevFile))));
+            rows.push(Item("Next file".to_string(), Message::VideoMenuAction(Box::new(Message::NextFile))));
+            rows.push(Item(format!("Back {:.0} s", app.seek_step_secs()), Message::VideoMenuAction(Box::new(Message::SeekStep(false)))));
+            rows.push(Item(format!("Forward {:.0} s", app.seek_step_secs()), Message::VideoMenuAction(Box::new(Message::SeekStep(true)))));
+            rows.push(Item("Step back one frame".to_string(), Message::VideoMenuAction(Box::new(Message::FrameStep(false)))));
+            rows.push(Item("Step forward one frame".to_string(), Message::VideoMenuAction(Box::new(Message::FrameStep(true)))));
+            rows.push(Item("Set A-B loop point A".to_string(), Message::VideoMenuAction(Box::new(Message::AbLoopSetA))));
+            rows.push(Item("Set A-B loop point B".to_string(), Message::VideoMenuAction(Box::new(Message::AbLoopSetB))));
+            rows.push(Item("Clear A-B loop".to_string(), Message::VideoMenuAction(Box::new(Message::AbLoopClear))));
         }
 
         rows.push(Header("Video & Audio", 1));
         if app.menu_section_open[1] {
-            rows.push(Item("Cycle fit / fill / stretch", Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
-            rows.push(Item("Take screenshot", Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
-            rows.push(Item("Cycle audio track", Message::VideoMenuAction(Box::new(Message::CycleAudio))));
+            rows.push(Item("Cycle fit / fill / stretch".to_string(), Message::VideoMenuAction(Box::new(Message::CycleFrameMode))));
+            rows.push(Item("Take screenshot".to_string(), Message::VideoMenuAction(Box::new(Message::TakeScreenshot))));
+            rows.push(Item("Cycle audio track".to_string(), Message::VideoMenuAction(Box::new(Message::CycleAudio))));
             let mute_label = if app.muted { "Unmute" } else { "Mute" };
-            rows.push(Item(mute_label, Message::VideoMenuAction(Box::new(Message::ToggleMute))));
-            rows.push(Item("Cycle subtitle track", Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
+            rows.push(Item(mute_label.to_string(), Message::VideoMenuAction(Box::new(Message::ToggleMute))));
+            rows.push(Item("Cycle subtitle track".to_string(), Message::VideoMenuAction(Box::new(Message::CycleSubtitle))));
         }
         rows.push(Divider);
     }
 
     let fs_label = if app.fullscreen { "Exit fullscreen" } else { "Fullscreen" };
-    rows.push(Item(fs_label, Message::VideoMenuAction(Box::new(Message::ToggleFullscreen))));
+    rows.push(Item(fs_label.to_string(), Message::VideoMenuAction(Box::new(Message::ToggleFullscreen))));
     let focus_label = if app.chrome_force_hidden { "Exit focus mode" } else { "Focus mode" };
-    rows.push(Item(focus_label, Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
+    rows.push(Item(focus_label.to_string(), Message::VideoMenuAction(Box::new(Message::ToggleChrome))));
     let pin_label = if app.pinned { "Unpin (always on top)" } else { "Always on top" };
-    rows.push(Item(pin_label, Message::VideoMenuAction(Box::new(Message::TogglePin))));
+    rows.push(Item(pin_label.to_string(), Message::VideoMenuAction(Box::new(Message::TogglePin))));
     let pip_label = if app.pip_active { "Exit Picture-in-Picture" } else { "Picture-in-Picture" };
-    rows.push(Item(pip_label, Message::VideoMenuAction(Box::new(Message::TogglePip))));
-    rows.push(Item("Playback settings", Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
-    rows.push(Item("Settings…", Message::VideoMenuAction(Box::new(Message::OpenAppSettings))));
-    rows.push(Item("Playback / system info", Message::VideoMenuAction(Box::new(Message::ToggleStats))));
+    rows.push(Item(pip_label.to_string(), Message::VideoMenuAction(Box::new(Message::TogglePip))));
+    rows.push(Item("Playback settings".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Settings)))));
+    rows.push(Item("Settings…".to_string(), Message::VideoMenuAction(Box::new(Message::OpenAppSettings))));
+    rows.push(Item("Playback / system info".to_string(), Message::VideoMenuAction(Box::new(Message::ToggleStats))));
     rows.push(Divider);
 
-    rows.push(Item("Keyboard shortcuts", Message::VideoMenuAction(Box::new(Message::ShowHelp))));
-    rows.push(Item("Exit", Message::VideoMenuAction(Box::new(Message::CloseWindow))));
+    rows.push(Item("Keyboard shortcuts".to_string(), Message::VideoMenuAction(Box::new(Message::ShowHelp))));
+    rows.push(Item("Exit".to_string(), Message::VideoMenuAction(Box::new(Message::CloseWindow))));
 
     rows
 }
@@ -952,7 +963,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                         }
                     }),
         )
-        .on_right_press(Message::ModalPasteRequest);
+        .on_right_press(Message::ModalRightClick);
 
         let dialog = container(
             column![
@@ -1020,10 +1031,48 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .align_x(Horizontal::Center)
             .align_y(Vertical::Center);
 
+        // Small "Paste" menu at the right-click position - a right-click
+        // that silently pasted with no visible response was easy to miss
+        // existed at all, so this makes the affordance explicit.
+        let paste_menu: Element<'_, Message> = if let Some((mx, my)) = app.modal_paste_menu {
+            let item = button(text("Paste").size(12).color(TEXT_BRIGHT))
+                .padding([7, 16])
+                .width(Length::Fixed(110.0))
+                .style(|_, status| {
+                    use iced::widget::button::Status;
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(
+                            if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                        )),
+                        ..Default::default()
+                    }
+                })
+                .on_press(Message::ModalPasteRequest);
+            let menu = container(item)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(BG_DEEPEST)),
+                    border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+                    ..Default::default()
+                });
+            let px = mx.clamp(4.0, (app.window_w_logical - 114.0).max(4.0));
+            let py = my.clamp(4.0, (app.window_h_logical - 40.0).max(4.0));
+            stack![
+                mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                    .on_press(Message::CloseModalPasteMenu),
+                pin(menu).x(px).y(py),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            Space::new().into()
+        };
+
         stack![
             with_panels_popup,
             mouse_area(backdrop).on_press(Message::ModalCancel),
             centered,
+            paste_menu,
         ]
         .width(Length::Fill)
         .height(Length::Fill)

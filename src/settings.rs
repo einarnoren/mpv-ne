@@ -57,11 +57,24 @@ pub struct PlaybackSettings {
     pub precise_seek: bool,
     /// Screenshot save directory. Empty = mpv default.
     pub screenshot_dir: String,
+    /// Seconds a single seek-step covers (Left/Right keys, the transport
+    /// skip buttons, and the menu's Back/Forward items all share this).
+    pub seek_step_secs: f64,
+    /// Playback-speed increment for the speed up/down keys and settings
+    /// nudge buttons.
+    pub speed_step: f64,
 }
 
 impl Default for PlaybackSettings {
     fn default() -> Self {
-        Self { resume_enabled: true, volume: 100.0, precise_seek: true, screenshot_dir: String::new() }
+        Self {
+            resume_enabled: true,
+            volume: 100.0,
+            precise_seek: true,
+            screenshot_dir: String::new(),
+            seek_step_secs: 5.0,
+            speed_step: 0.1,
+        }
     }
 }
 
@@ -149,7 +162,26 @@ pub struct InterfaceSettings {
     /// process. Off by default - multiple instances is the existing/
     /// expected behavior, this is opt-in.
     pub single_instance: bool,
+    /// Windows-only: minimizing the main window hides it to a system tray
+    /// icon instead of the taskbar. Click/double-click the icon to restore;
+    /// right-click for a Restore/Exit menu.
+    pub minimize_to_tray: bool,
+    /// Preset ids (see `app::MOUSE_ACTION_PRESETS`) for the 4 mouse
+    /// triggers on the video area.
+    #[serde(default = "default_mouse_single_click")]
+    pub mouse_single_click: String,
+    #[serde(default = "default_mouse_double_click")]
+    pub mouse_double_click: String,
+    #[serde(default = "default_mouse_scroll_up")]
+    pub mouse_scroll_up: String,
+    #[serde(default = "default_mouse_scroll_down")]
+    pub mouse_scroll_down: String,
 }
+
+fn default_mouse_single_click() -> String { "none".into() }
+fn default_mouse_double_click() -> String { "toggle_fullscreen".into() }
+fn default_mouse_scroll_up() -> String { "volume_up_2".into() }
+fn default_mouse_scroll_down() -> String { "volume_down_2".into() }
 
 impl Default for InterfaceSettings {
     fn default() -> Self {
@@ -167,6 +199,11 @@ impl Default for InterfaceSettings {
             pause_on_minimize: false,
             auto_load_siblings: true,
             single_instance: false,
+            minimize_to_tray: false,
+            mouse_single_click: default_mouse_single_click(),
+            mouse_double_click: default_mouse_double_click(),
+            mouse_scroll_up: default_mouse_scroll_up(),
+            mouse_scroll_down: default_mouse_scroll_down(),
         }
     }
 }
@@ -215,6 +252,8 @@ impl Settings {
                 volume: f64_of("volume", 100.0),
                 precise_seek: bool_of("precise_seek", true),
                 screenshot_dir: str_of("screenshot_dir"),
+                seek_step_secs: f64_of("seek_step_secs", 5.0),
+                speed_step: f64_of("speed_step", 0.1),
             },
             audio: AudioSettings {
                 normalize: bool_of("audio_normalize", false),
