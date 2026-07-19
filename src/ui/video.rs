@@ -4,7 +4,7 @@ use iced::wgpu;
 use iced::widget::shader::{self, Pipeline, Primitive, Viewport};
 use iced::{Color, Element, Length, Rectangle, mouse};
 
-use crate::app::{FrameMode, Message, MpvNe};
+use crate::app::{FrameMode, Message, MpvNe, Projection, StereoOutput, StereoSource};
 
 /// Cheaply-cloneable frame payload. The Arc-wrapped pixel buffer flows from
 /// the player thread, into app state, then into the shader Program each draw.
@@ -13,6 +13,11 @@ pub struct VideoFrame {
     pub pixels: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
+    /// Monotonic id assigned when the frame is created (see
+    /// `MpvNe::next_frame_seq`) - lets the GPU pipeline tell whether it's
+    /// already uploaded this exact frame without relying on pointer
+    /// identity, which a freed-then-reused `Arc` allocation could alias.
+    pub seq: u64,
 }
 
 impl std::fmt::Debug for VideoFrame {
@@ -28,7 +33,16 @@ impl std::fmt::Debug for VideoFrame {
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     if let Some(frame) = &app.current_frame {
         if app.player.path.is_some() && !app.stopped {
-            return iced::widget::shader(VideoProgram { frame: frame.clone(), mode: app.frame_mode })
+            return iced::widget::shader(VideoProgram {
+                frame: frame.clone(),
+                mode: app.frame_mode,
+                stereo_source: app.video_stereo_source,
+                stereo_output: app.video_stereo_output,
+                projection: app.video_projection,
+                vr_yaw: app.vr_yaw,
+                vr_pitch: app.vr_pitch,
+                vr_fov_deg: app.vr_fov_deg,
+            })
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into();
@@ -58,6 +72,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 struct VideoProgram {
     frame: VideoFrame,
     mode: FrameMode,
+    stereo_source: StereoSource,
+    stereo_output: StereoOutput,
+    projection: Projection,
+    vr_yaw: f32,
+    vr_pitch: f32,
+    vr_fov_deg: f32,
 }
 
 impl shader::Program<Message> for VideoProgram {
@@ -70,7 +90,16 @@ impl shader::Program<Message> for VideoProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        VideoPrimitive { frame: self.frame.clone(), mode: self.mode }
+        VideoPrimitive {
+            frame: self.frame.clone(),
+            mode: self.mode,
+            stereo_source: self.stereo_source,
+            stereo_output: self.stereo_output,
+            projection: self.projection,
+            vr_yaw: self.vr_yaw,
+            vr_pitch: self.vr_pitch,
+            vr_fov_deg: self.vr_fov_deg,
+        }
     }
 }
 
@@ -80,6 +109,12 @@ impl shader::Program<Message> for VideoProgram {
 struct VideoPrimitive {
     frame: VideoFrame,
     mode: FrameMode,
+    stereo_source: StereoSource,
+    stereo_output: StereoOutput,
+    projection: Projection,
+    vr_yaw: f32,
+    vr_pitch: f32,
+    vr_fov_deg: f32,
 }
 
 impl Primitive for VideoPrimitive {
@@ -94,7 +129,10 @@ impl Primitive for VideoPrimitive {
         _viewport: &Viewport,
     ) {
         pipeline.upload(device, queue, &self.frame);
-        pipeline.update_uniforms(queue, bounds, &self.frame, self.mode);
+        pipeline.update_uniforms(
+            queue, bounds, &self.frame, self.mode, self.stereo_source, self.stereo_output,
+            self.projection, self.vr_yaw, self.vr_pitch, self.vr_fov_deg,
+        );
     }
 
     /// iced sets the render pass viewport + scissor to our widget bounds
@@ -116,6 +154,12 @@ pub struct VideoPipeline {
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
     texture: Option<TextureBundle>,
+    /// `seq` of the last frame actually uploaded to the GPU texture.
+    /// `view()` re-clones the current `VideoFrame` on every redraw (cursor
+    /// moves, menu opens, anything), not just when mpv delivers a new
+    /// frame - without this, every one of those redraws re-uploaded the
+    /// same still-unchanged pixel buffer to the GPU for nothing.
+    last_uploaded: Option<u64>,
 }
 
 struct TextureBundle {
@@ -170,7 +214,10 @@ impl Pipeline for VideoPipeline {
 
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("video uniforms"),
-            size: 16, // vec2<f32> padded to 16 bytes
+            // v0: scale (vec2<f32>) + stereo_source + stereo_output
+            // v1: yaw, pitch, tan_half_fov, widget_aspect
+            // v2: projection, unused x3
+            size: 48,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -214,7 +261,7 @@ impl Pipeline for VideoPipeline {
             ..Default::default()
         });
 
-        Self { pipeline, bgl, sampler, uniforms, texture: None }
+        Self { pipeline, bgl, sampler, uniforms, texture: None, last_uploaded: None }
     }
 }
 
@@ -267,6 +314,16 @@ impl VideoPipeline {
             });
         }
 
+        // Skip the upload entirely if this exact frame (by Arc identity) is
+        // already sitting in the texture - `view()` clones the VideoFrame on
+        // every redraw regardless of whether mpv delivered a new one, so
+        // most redraws (cursor moves, menu opens, etc.) would otherwise
+        // re-upload identical pixel data to the GPU for nothing.
+        if !needs_recreate && self.last_uploaded == Some(frame.seq) {
+            return;
+        }
+        self.last_uploaded = Some(frame.seq);
+
         let t = self.texture.as_ref().unwrap();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -291,34 +348,76 @@ impl VideoPipeline {
 
     /// Compute aspect-ratio-preserving scale factors and upload them.
     /// The fragment shader uses these to letterbox the video inside the widget.
+    #[allow(clippy::too_many_arguments)]
     fn update_uniforms(
         &self,
         queue: &wgpu::Queue,
         bounds: &Rectangle,
         frame: &VideoFrame,
         mode: FrameMode,
+        stereo_source: StereoSource,
+        stereo_output: StereoOutput,
+        projection: Projection,
+        vr_yaw: f32,
+        vr_pitch: f32,
+        vr_fov_deg: f32,
     ) {
         if frame.width == 0 || frame.height == 0 || bounds.width <= 0.0 || bounds.height <= 0.0
         {
             return;
         }
         let widget_aspect = bounds.width / bounds.height;
-        let tex_aspect = frame.width as f32 / frame.height as f32;
+        // A stereoscopic source packs two eyes into one frame - the fit/fill
+        // math below needs to letterbox against a single eye's aspect ratio,
+        // not the whole packed frame's.
+        let (eye_w, eye_h) = match stereo_source {
+            StereoSource::Mono => (frame.width as f32, frame.height as f32),
+            StereoSource::SideBySide => (frame.width as f32 / 2.0, frame.height as f32),
+            StereoSource::OverUnder => (frame.width as f32, frame.height as f32 / 2.0),
+        };
+        let tex_aspect = eye_w / eye_h;
         let wider = widget_aspect > tex_aspect;
         // The shader samples tex_uv = (uv - 0.5) / scale + 0.5: scale < 1
         // letterboxes that axis, scale > 1 zooms in and crops it, scale == 1
         // maps the axis edge-to-edge.
-        let (sx, sy) = match mode {
-            // Fit (contain): whole frame visible, bars on the limiting axis.
-            FrameMode::Fit if wider => (tex_aspect / widget_aspect, 1.0),
-            FrameMode::Fit => (1.0, widget_aspect / tex_aspect),
-            // Fill (cover): scale up to cover, crop overflow — branches swapped.
-            FrameMode::Fill if wider => (1.0, widget_aspect / tex_aspect),
-            FrameMode::Fill => (tex_aspect / widget_aspect, 1.0),
-            // Stretch: map both axes edge-to-edge, distorting the aspect ratio.
-            FrameMode::Stretch => (1.0, 1.0),
+        // A VR projection casts a perspective ray per pixel instead of
+        // fitting/filling a flat frame - it always fills the whole widget,
+        // so the letterbox scale is simply identity in that mode.
+        let (sx, sy) = if projection != Projection::Flat {
+            (1.0, 1.0)
+        } else {
+            match mode {
+                // Fit (contain): whole frame visible, bars on the limiting axis.
+                FrameMode::Fit if wider => (tex_aspect / widget_aspect, 1.0),
+                FrameMode::Fit => (1.0, widget_aspect / tex_aspect),
+                // Fill (cover): scale up to cover, crop overflow — branches swapped.
+                FrameMode::Fill if wider => (1.0, widget_aspect / tex_aspect),
+                FrameMode::Fill => (tex_aspect / widget_aspect, 1.0),
+                // Stretch: map both axes edge-to-edge, distorting the aspect ratio.
+                FrameMode::Stretch => (1.0, 1.0),
+            }
         };
-        let data: [f32; 4] = [sx, sy, 0.0, 0.0];
+        let stereo_source_code = match stereo_source {
+            StereoSource::Mono => 0.0,
+            StereoSource::SideBySide => 1.0,
+            StereoSource::OverUnder => 2.0,
+        };
+        let stereo_output_code = match stereo_output {
+            StereoOutput::LeftEye => 0.0,
+            StereoOutput::RightEye => 1.0,
+            StereoOutput::AnaglyphRedCyan => 2.0,
+        };
+        let projection_code: f32 = match projection {
+            Projection::Flat => 0.0,
+            Projection::Equirect360 => 1.0,
+            Projection::Equirect180 => 2.0,
+        };
+        let tan_half_fov = (vr_fov_deg.to_radians() * 0.5).tan();
+        let data: [f32; 12] = [
+            sx, sy, stereo_source_code, stereo_output_code,
+            vr_yaw, vr_pitch, tan_half_fov, widget_aspect,
+            projection_code, 0.0, 0.0, 0.0,
+        ];
         let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
         queue.write_buffer(&self.uniforms, 0, &bytes);
     }
@@ -368,22 +467,99 @@ fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
 @group(0) @binding(1) var s_diffuse: sampler;
 
 struct Uniforms {
-    scale: vec2<f32>,
+    // Packed as 3 explicit vec4s rather than individual scalar fields so
+    // the WGSL/CPU-side layouts stay trivially in sync (a flat [f32; 12]
+    // array on the Rust side, no implicit std140-style padding to reason
+    // about).
+    v0: vec4<f32>, // scale.x, scale.y, stereo_source, stereo_output
+    v1: vec4<f32>, // vr_yaw, vr_pitch, tan_half_fov, widget_aspect
+    v2: vec4<f32>, // projection, unused, unused, unused
 };
 @group(0) @binding(2) var<uniform> u: Uniforms;
 
+const PI: f32 = 3.14159265359;
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Map the widget UV into the video's UV space, centered.
-    let tex_uv = (in.uv - vec2<f32>(0.5, 0.5)) / u.scale + vec2<f32>(0.5, 0.5);
-    if (tex_uv.x < 0.0 || tex_uv.x > 1.0 || tex_uv.y < 0.0 || tex_uv.y > 1.0) {
-        // BG_DEEPEST - matches the outer container so letterbox blends.
-        return vec4<f32>(0.075, 0.085, 0.110, 1.0);
+    var eye_uv: vec2<f32>;
+    let projection = i32(round(u.v2.x));
+
+    if (projection == 0) {
+        // Flat: map the widget UV into a single eye's UV space, centered -
+        // letterbox bars use this same eye-space rectangle regardless of
+        // stereo mode (update_uniforms already computed `scale` against one
+        // eye's aspect).
+        eye_uv = (in.uv - vec2<f32>(0.5, 0.5)) / u.v0.xy + vec2<f32>(0.5, 0.5);
+        if (eye_uv.x < 0.0 || eye_uv.x > 1.0 || eye_uv.y < 0.0 || eye_uv.y > 1.0) {
+            // BG_DEEPEST - matches the outer container so letterbox blends.
+            return vec4<f32>(0.075, 0.085, 0.110, 1.0);
+        }
+    } else {
+        // VR: cast a perspective ray through this pixel (a virtual camera
+        // looking into the equirectangular panorama) and convert it to
+        // spherical coordinates to sample the source. This fills the whole
+        // widget - no letterboxing concept applies to a VR view.
+        let ndc = in.uv * 2.0 - vec2<f32>(1.0, 1.0);
+        let tan_half_fov = u.v1.z;
+        let aspect = u.v1.w;
+        let dir_cam = normalize(vec3<f32>(ndc.x * tan_half_fov * aspect, -ndc.y * tan_half_fov, -1.0));
+
+        let yaw = u.v1.x;
+        let pitch = u.v1.y;
+        let cy = cos(yaw); let sy = sin(yaw);
+        let cp = cos(pitch); let sp = sin(pitch);
+        // Pitch (around X) then yaw (around Y) - standard FPS-camera order.
+        let d1 = vec3<f32>(dir_cam.x, dir_cam.y * cp - dir_cam.z * sp, dir_cam.y * sp + dir_cam.z * cp);
+        let dir = vec3<f32>(d1.x * cy + d1.z * sy, d1.y, -d1.x * sy + d1.z * cy);
+
+        let theta = atan2(dir.x, -dir.z); // longitude, -PI..PI
+        let phi = asin(clamp(dir.y, -1.0, 1.0)); // latitude, -PI/2..PI/2
+
+        if (projection == 2) {
+            // 180 half-sphere: only the front hemisphere has content -
+            // looking behind the camera shows nothing.
+            if (abs(theta) > PI * 0.5) {
+                return vec4<f32>(0.075, 0.085, 0.110, 1.0);
+            }
+            eye_uv = vec2<f32>(theta / PI + 0.5, 0.5 - phi / PI);
+        } else {
+            // 360 full sphere: wrap horizontally with fract() rather than
+            // relying on the sampler's address mode, so the wrap stays
+            // inside this one eye's sub-image instead of bleeding into the
+            // other eye's half for a stereoscopic 360 source.
+            eye_uv = vec2<f32>(fract(theta / (2.0 * PI) + 0.5), 0.5 - phi / PI);
+        }
     }
+
     // Force alpha=1.0: iced uses PostMultiplied alpha on Windows DXGI, so any
     // alpha<1 pixel shows the desktop through. mpv may leave alpha unset in
     // letterbox regions of its own internal render.
-    let c = textureSample(t_diffuse, s_diffuse, tex_uv);
+    let src = i32(round(u.v0.z));
+    if (src == 0) {
+        let c = textureSample(t_diffuse, s_diffuse, eye_uv);
+        return vec4<f32>(c.rgb, 1.0);
+    }
+
+    // Stereoscopic: eye_uv addresses a single eye's frame - remap it into
+    // the packed source texture's left/right half.
+    var left_uv: vec2<f32>;
+    var right_uv: vec2<f32>;
+    if (src == 1) {
+        left_uv = vec2<f32>(eye_uv.x * 0.5, eye_uv.y);
+        right_uv = vec2<f32>(eye_uv.x * 0.5 + 0.5, eye_uv.y);
+    } else {
+        left_uv = vec2<f32>(eye_uv.x, eye_uv.y * 0.5);
+        right_uv = vec2<f32>(eye_uv.x, eye_uv.y * 0.5 + 0.5);
+    }
+
+    let outm = i32(round(u.v0.w));
+    if (outm == 2) {
+        let l = textureSample(t_diffuse, s_diffuse, left_uv);
+        let r = textureSample(t_diffuse, s_diffuse, right_uv);
+        return vec4<f32>(l.r, r.g, r.b, 1.0);
+    }
+    let coord = select(right_uv, left_uv, outm == 0);
+    let c = textureSample(t_diffuse, s_diffuse, coord);
     return vec4<f32>(c.rgb, 1.0);
 }
 "#;

@@ -19,6 +19,9 @@ pub struct ModalDialog {
     pub prompt:      &'static str,
     pub input:       String,
     pub kind:        ModalKind,
+    /// Only meaningful for `ModalKind::OpenUrl` - see
+    /// `MpvNe::open_via_ytdlp_download`'s doc comment for why this exists.
+    pub download_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,6 +161,76 @@ impl FrameMode {
             FrameMode::Fit => "Fit",
             FrameMode::Fill => "Fill",
             FrameMode::Stretch => "Stretch",
+        }
+    }
+}
+
+/// How the raw decoded frame is laid out for stereoscopic 3D sources -
+/// applied by the video shader alongside the letterbox/fit math (mpv still
+/// hands us one plain frame; the eye split happens entirely on the GPU).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StereoSource {
+    /// Not a 3D source - shader passes the frame through untouched.
+    #[default]
+    Mono,
+    /// Left eye in the left half, right eye in the right half.
+    SideBySide,
+    /// Left eye on top, right eye on bottom.
+    OverUnder,
+}
+
+impl StereoSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            StereoSource::Mono => "Mono (2D)",
+            StereoSource::SideBySide => "Side-by-side",
+            StereoSource::OverUnder => "Over-under",
+        }
+    }
+}
+
+/// How a stereoscopic source is presented on a regular 2D display. Ignored
+/// when `StereoSource::Mono`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StereoOutput {
+    #[default]
+    LeftEye,
+    RightEye,
+    AnaglyphRedCyan,
+}
+
+impl StereoOutput {
+    pub fn label(self) -> &'static str {
+        match self {
+            StereoOutput::LeftEye => "Left eye only",
+            StereoOutput::RightEye => "Right eye only",
+            StereoOutput::AnaglyphRedCyan => "Anaglyph (red-cyan)",
+        }
+    }
+}
+
+/// VR video projection: real 360/180 footage is an equirectangular (or
+/// fisheye) panorama, not a normal flat photo - `Flat` is everything else
+/// (regular video, and regular stereoscopic 3D handled by `StereoSource`
+/// above). When not `Flat`, the shader casts a perspective ray per pixel
+/// (driven by `MpvNe::vr_yaw`/`vr_pitch`/`vr_fov_deg`) and maps it to
+/// equirectangular UV instead of applying the flat letterbox/fit math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Projection {
+    #[default]
+    Flat,
+    /// Full sphere - panorama wraps all the way around.
+    Equirect360,
+    /// Front hemisphere only - most "VR180" cameras/sites use this.
+    Equirect180,
+}
+
+impl Projection {
+    pub fn label(self) -> &'static str {
+        match self {
+            Projection::Flat => "Flat (2D/3D)",
+            Projection::Equirect360 => "360° equirectangular",
+            Projection::Equirect180 => "180° equirectangular",
         }
     }
 }
@@ -377,6 +450,11 @@ fn set_custom_title_bar(on: bool) {
 pub struct MpvNe {
     pub player: Player,
     pub current_frame: Option<VideoFrame>,
+    /// Monotonic counter assigned to each new `VideoFrame` - lets the GPU
+    /// pipeline (ui/video.rs) skip re-uploading a frame it's already sent
+    /// to the texture, without relying on `Arc` pointer identity (which a
+    /// freed-then-reused allocation could alias).
+    frame_seq: u64,
     pending_w: u32,
     pending_h: u32,
     resize_seq: u64,
@@ -533,11 +611,25 @@ pub struct MpvNe {
     /// for the polling subscription that receives forwarded files (see
     /// `Message::PollSingleInstance`).
     pub single_instance: bool,
+    /// Automatically retry a failed URL open via the yt-dlp-download
+    /// fallback (see `open_via_ytdlp_download`) instead of just failing.
+    pub auto_retry_download: bool,
     /// URL waiting on `download_ytdlp` to finish before it can be opened -
     /// set when a URL needs yt-dlp and it isn't available yet - see
     /// `Message::ModalConfirm`'s `ModalKind::OpenUrl` arm and
     /// `Message::YtdlpDownloadResult`.
     pending_ytdl_url: Option<String>,
+    /// A yt-dlp subprocess downloading to a local temp file for the
+    /// "fetch via download" open-URL mode, plus that file's path - see
+    /// `open_via_ytdlp_download`. Some sites' CDNs block direct hotlinking
+    /// (TLS/client fingerprinting, not just headers) so mpv can't open the
+    /// resolved stream URL itself; piping the video through yt-dlp's own
+    /// (properly browser-like) HTTP client works around that. Killed and
+    /// cleaned up whenever playback moves on to something else.
+    ytdlp_download: Option<(std::process::Child, std::path::PathBuf)>,
+    /// Set while waiting for `ytdlp_download`'s temp file to have enough
+    /// bytes to start playback - cleared once `open_url` is issued for it.
+    pending_ytdlp_open: Option<std::path::PathBuf>,
     /// Suppresses the next volume OSD (used when restoring saved volume at startup).
     suppress_volume_osd: bool,
     suppress_speed_osd: bool,
@@ -609,6 +701,9 @@ pub struct MpvNe {
     /// Which panel (if any) is docked to the right. Toggling with the same
     /// kind closes it; toggling with a different kind switches without resize.
     pub active_panel: Option<PanelKind>,
+    /// Last known scroll position of the docked Playback settings panel -
+    /// restored after every message while the panel is open. See `update`.
+    settings_scroll_offset: iced::widget::scrollable::RelativeOffset,
     /// The panel to reopen when the panels button is pressed while closed.
     /// Remembers the last panel the user had open; starts on Playlist.
     pub last_panel: PanelKind,
@@ -682,6 +777,21 @@ pub struct MpvNe {
     /// How the video frame is fitted into the window (Fit/Fill/Stretch).
     /// Cycled with the Z key; resets to Fit on file load.
     pub frame_mode: FrameMode,
+    /// Stereoscopic 3D source layout (mono/SBS/OU) and how it's presented on
+    /// a regular 2D display. Resets to defaults on file load, same reasoning
+    /// as `frame_mode` - most content is plain 2D.
+    pub video_stereo_source: StereoSource,
+    pub video_stereo_output: StereoOutput,
+    /// VR projection mode and view state - see `Projection`. Resets on file
+    /// load, same as the stereo fields above.
+    pub video_projection: Projection,
+    pub vr_yaw: f32,
+    pub vr_pitch: f32,
+    pub vr_fov_deg: f32,
+    /// Set while click-dragging a VR projection to look around, instead of
+    /// panning a flat zoomed video - `(start_cursor_x, start_cursor_y,
+    /// start_yaw, start_pitch)`. Mutually exclusive with `pan_drag_start`.
+    vr_drag_start: Option<(f32, f32, f32, f32)>,
     /// Latest polled playback stats; only refreshed while `show_stats` is on.
     pub stats: crate::player::PlayerStats,
     /// Monotonically-increasing counter for deferred thumbnail generation.
@@ -708,6 +818,7 @@ impl Default for MpvNe {
         let mut app = Self {
             player: Player::default(),
             current_frame: None,
+            frame_seq: 0,
             pending_w: 0,
             pending_h: 0,
             resize_seq: 0,
@@ -779,7 +890,10 @@ impl Default for MpvNe {
             main_window_was_minimized: false,
             auto_load_siblings: prefs.interface.auto_load_siblings,
             single_instance: prefs.interface.single_instance,
+            auto_retry_download: prefs.interface.auto_retry_download,
             pending_ytdl_url: None,
+            ytdlp_download: None,
+            pending_ytdlp_open: None,
             suppress_volume_osd: false,
             suppress_speed_osd: true, // suppress the startup 1x event
             show_help: false,
@@ -814,6 +928,7 @@ impl Default for MpvNe {
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
+            settings_scroll_offset: iced::widget::scrollable::RelativeOffset::default(),
             last_panel: PanelKind::Playlist,
             browser_path: None,
             browser_entries: Vec::new(),
@@ -835,6 +950,13 @@ impl Default for MpvNe {
             probed_duration: 0.0,
             show_stats: false,
             frame_mode: FrameMode::Fit,
+            video_stereo_source: StereoSource::Mono,
+            video_stereo_output: StereoOutput::LeftEye,
+            video_projection: Projection::Flat,
+            vr_yaw: 0.0,
+            vr_pitch: 0.0,
+            vr_fov_deg: 90.0,
+            vr_drag_start: None,
             stats: crate::player::PlayerStats::default(),
             thumb_pending_id: 0,
             pre_fullscreen_w: None,
@@ -880,7 +1002,7 @@ pub enum Message {
     PositionChanged(f64),
     DurationChanged(f64),
     FileLoaded,
-    EndFile,
+    EndFile(bool),
     EofReached(bool),
     PauseChanged(bool),
     FrameReady(Vec<u8>, u32, u32),
@@ -1018,6 +1140,15 @@ pub enum Message {
     ToggleStats,
     /// Cycle the video framing: Fit → Fill → Stretch.
     CycleFrameMode,
+    SetStereoSource(StereoSource),
+    SetStereoOutput(StereoOutput),
+    SetProjection(Projection),
+    VrFovAdjust(f32),
+    VrResetView,
+    SettingsScrolled(iced::widget::scrollable::RelativeOffset),
+    /// Jump the docked Playback settings panel to a category, via the
+    /// quick-nav row - see `settings::CATEGORY_ANCHORS`.
+    SettingsJumpTo(f32),
     /// Periodic poll to refresh the stats overlay while it is visible.
     StatsTick,
     // Loop / deinterlace toggles
@@ -1045,6 +1176,11 @@ pub enum Message {
     PlaylistLoaded(Vec<std::path::PathBuf>),
     OpenModal(ModalKind),
     ModalInput(String),
+    ToggleModalDownloadMode,
+    ToggleAutoRetryDownload,
+    /// Poll the pending yt-dlp-download temp file until it has enough
+    /// bytes to start playback. See `open_via_ytdlp_download`.
+    YtdlpDownloadPollTick,
     /// Right-click on the modal text field: open a small "Paste" menu at
     /// the cursor, rather than pasting silently - a right-click with no
     /// visible response was easy to miss existed at all.
@@ -1288,6 +1424,21 @@ impl MpvNe {
         });
 
         let mut startup_tasks = vec![correct_size];
+        // A few harmless follow-up redraws shortly after startup. Some
+        // machines have shown an incomplete-looking first paint (controls
+        // bar rendered with blank/unstyled buttons) that persists until
+        // *any* redraw happens - manually resizing the window fixes it
+        // instantly, which points at a one-time render hiccup (likely
+        // something warming up lazily, e.g. SVG icon rasterization) rather
+        // than a wrong size or state bug, since nothing else about the
+        // window changes. A window that never loads a file has no other
+        // periodic redraw to naturally flush this, so force a couple.
+        for delay_ms in [150, 500] {
+            startup_tasks.push(Task::perform(
+                async move { tokio::time::sleep(Duration::from_millis(delay_ms)).await },
+                |_| Message::Noop,
+            ));
+        }
         if app.pinned {
             startup_tasks.push(iced::window::set_level(id, iced::window::Level::AlwaysOnTop));
         }
@@ -1305,7 +1456,26 @@ impl MpvNe {
         (app, Task::batch(startup_tasks))
     }
 
+    /// Thin wrapper around `update_inner` that also restores the docked
+    /// Playback settings panel's scroll position after every message while
+    /// it's open. Needed because so many of the panel's own controls change
+    /// a value that's part of the `lazy`-memoized snapshot driving its
+    /// content - see settings.rs's `view` doc comment for the underlying
+    /// scroll-loss issue this is protecting against.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        if self.active_panel == Some(PanelKind::Settings) {
+            let restore = iced::widget::operation::snap_to(
+                "settings_scroll",
+                self.settings_scroll_offset,
+            );
+            Task::batch([task, restore])
+        } else {
+            task
+        }
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::OpenFile => {
                 return Task::perform(
@@ -1335,6 +1505,29 @@ impl MpvNe {
                 self.player.stop();
                 self.current_frame = None;
                 self.stopped = true;
+                self.kill_ytdlp_download();
+            }
+            Message::YtdlpDownloadPollTick => {
+                let Some(path) = self.pending_ytdlp_open.clone() else {
+                    return Task::none();
+                };
+                // A few hundred KB is enough to know mpv can actually start
+                // demuxing - waiting for more would just add startup delay.
+                let ready = std::fs::metadata(&path).is_ok_and(|m| m.len() > 200_000);
+                if ready {
+                    self.pending_ytdlp_open = None;
+                    self.player.open_url(&path.to_string_lossy());
+                    return Task::done(Message::ShowOsd("Playing (via yt-dlp download)".into()));
+                } else if self.ytdlp_download.as_mut().is_some_and(|(child, _)| {
+                    child.try_wait().is_ok_and(|status| status.is_some())
+                }) {
+                    // The yt-dlp process already exited without ever
+                    // producing enough data - it failed outright rather
+                    // than just being slow to start.
+                    self.pending_ytdlp_open = None;
+                    self.kill_ytdlp_download();
+                    return Task::done(Message::ShowOsd("yt-dlp download failed".into()));
+                }
             }
             Message::Seek(pos) => {
                 self.live_catching_up = false;
@@ -1505,6 +1698,7 @@ impl MpvNe {
                                 auto_load_siblings: self.auto_load_siblings,
                                 single_instance: self.single_instance,
                                 minimize_to_tray: self.minimize_to_tray,
+                                auto_retry_download: self.auto_retry_download,
                                 mouse_single_click: self.mouse_bindings.single_click.clone(),
                                 mouse_double_click: self.mouse_bindings.double_click.clone(),
                                 mouse_scroll_up: self.mouse_bindings.scroll_up.clone(),
@@ -1679,6 +1873,11 @@ impl MpvNe {
                 self.size_ref_duration = 0.0;
                 self.probed_duration = 0.0;
                 self.frame_mode = FrameMode::Fit;
+                self.video_stereo_source = StereoSource::Mono;
+                self.video_stereo_output = StereoOutput::LeftEye;
+                self.video_projection = Projection::Flat;
+                self.vr_yaw = 0.0;
+                self.vr_pitch = 0.0;
                 // Clear AB loop points and video transform when a new file starts.
                 self.ab_loop_a = None;
                 self.ab_loop_b = None;
@@ -1827,10 +2026,27 @@ impl MpvNe {
                     }
                 }
             }
-            Message::EndFile => {
+            Message::EndFile(is_error) => {
                 if self.transitioning {
                     // We already saved resume and set the new path before
                     // calling open(); don't touch path/paused here.
+                } else if is_error
+                    && self.auto_retry_download
+                    && self.ytdlp_download.is_none()
+                    && self.pending_ytdlp_open.is_none()
+                    && self.player.path.as_deref().is_some_and(|p| p.starts_with("http"))
+                {
+                    // A direct URL open failed outright (not just reached
+                    // EOF) - some sites block mpv/ffmpeg from fetching the
+                    // resolved stream URL directly even though yt-dlp can.
+                    // Retry once via the download fallback automatically
+                    // rather than making the user notice the failure and
+                    // manually re-open with the checkbox.
+                    let url = self.player.path.clone().unwrap();
+                    return Task::batch([
+                        Task::done(Message::ShowOsd("Direct open failed - retrying via yt-dlp download...".into())),
+                        self.open_via_ytdlp_download(url),
+                    ]);
                 } else {
                     tracing::info!(
                         pos = self.player.position,
@@ -1909,6 +2125,34 @@ impl MpvNe {
                 // native size), so this only advances the mode the renderer reads.
                 self.frame_mode = self.frame_mode.next();
                 return Task::done(Message::ShowOsd(self.frame_mode.label().into()));
+            }
+            Message::SetStereoSource(s) => {
+                self.video_stereo_source = s;
+                return Task::done(Message::ShowOsd(s.label().into()));
+            }
+            Message::SetStereoOutput(o) => {
+                self.video_stereo_output = o;
+                return Task::done(Message::ShowOsd(o.label().into()));
+            }
+            Message::SetProjection(p) => {
+                self.video_projection = p;
+                self.vr_yaw = 0.0;
+                self.vr_pitch = 0.0;
+                return Task::done(Message::ShowOsd(p.label().into()));
+            }
+            Message::VrFovAdjust(delta) => {
+                self.vr_fov_deg = (self.vr_fov_deg + delta).clamp(30.0, 130.0);
+            }
+            Message::VrResetView => {
+                self.vr_yaw = 0.0;
+                self.vr_pitch = 0.0;
+                self.vr_fov_deg = 90.0;
+            }
+            Message::SettingsScrolled(offset) => {
+                self.settings_scroll_offset = offset;
+            }
+            Message::SettingsJumpTo(y) => {
+                self.settings_scroll_offset = iced::widget::scrollable::RelativeOffset { x: 0.0, y };
             }
             Message::LiveDurationProbed(dur) => {
                 // Update duration from the container byte-rate probe so the
@@ -1990,10 +2234,12 @@ impl MpvNe {
                     // Drop frames that arrive after Stop until playback resumes.
                     return Task::none();
                 }
+                self.frame_seq += 1;
                 self.current_frame = Some(VideoFrame {
                     pixels: Arc::new(pixels),
                     width: w,
                     height: h,
+                    seq: self.frame_seq,
                 });
             }
 
@@ -2385,10 +2631,19 @@ impl MpvNe {
                     ModalKind::OpenUrl    => ("Open URL / stream", "Enter URL or file path"),
                     ModalKind::AddPlaylistUrl => ("Add URL to playlist", "Enter URL or file path"),
                 };
-                self.modal = Some(ModalDialog { title, prompt, input: String::new(), kind });
+                self.modal = Some(ModalDialog { title, prompt, input: String::new(), kind, download_mode: false });
             }
             Message::ModalInput(s) => {
                 if let Some(m) = &mut self.modal { m.input = s; }
+            }
+            Message::ToggleModalDownloadMode => {
+                if let Some(m) = &mut self.modal { m.download_mode = !m.download_mode; }
+            }
+            Message::ToggleAutoRetryDownload => {
+                self.auto_retry_download = !self.auto_retry_download;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.auto_retry_download = self.auto_retry_download;
+                prefs.save();
             }
             Message::ModalRightClick => {
                 if self.modal.is_some() {
@@ -2439,6 +2694,8 @@ impl MpvNe {
                                         Task::done(Message::ShowOsd("Downloading yt-dlp...".into())),
                                         Task::perform(download_ytdlp(), Message::YtdlpDownloadResult),
                                     ]);
+                                } else if m.download_mode {
+                                    return self.open_via_ytdlp_download(m.input);
                                 } else {
                                     self.player.open_url(&m.input);
                                     self.recent_files.record(&std::path::PathBuf::from(&m.input));
@@ -3009,6 +3266,7 @@ impl MpvNe {
             Message::CloseRequested(id) => {
                 if Some(id) == self.window_id {
                     self.save_resume();
+                    self.kill_ytdlp_download();
                     self.player.quit();
                     // Daemons (needed for the floating menu popup window)
                     // don't auto-quit when their windows close, unlike a
@@ -3657,6 +3915,17 @@ impl MpvNe {
                         self.player.video_pan_x = new_x;
                         self.player.video_pan_y = new_y;
                     }
+                    if let Some((start_x, start_y, start_yaw, start_pitch)) = self.vr_drag_start {
+                        let w = (self.window_w_logical - if self.active_panel.is_some() { PANEL_W } else { 0.0 }).max(1.0);
+                        let fov_rad = self.vr_fov_deg.to_radians();
+                        // Dragging across the full video width rotates by
+                        // roughly one FOV's worth - an intuitive 1:1 feel
+                        // regardless of the zoom level.
+                        let new_yaw = start_yaw - (x - start_x) / w * fov_rad;
+                        let new_pitch = (start_pitch + (y - start_y) / w * fov_rad).clamp(-1.55, 1.55);
+                        self.vr_yaw = new_yaw;
+                        self.vr_pitch = new_pitch;
+                    }
                 } else if Some(id) == self.panel_window_id {
                     self.panel_cursor_pos = Some((x, y));
                 } else if Some(id) == self.app_settings_window_id {
@@ -3675,6 +3944,7 @@ impl MpvNe {
             Message::InputMouseUp(_id, button) => {
                 if button == iced::mouse::Button::Left {
                     self.pan_drag_start = None;
+                    self.vr_drag_start = None;
                 }
             }
             Message::WindowUnfocused(id) => {
@@ -3842,6 +4112,24 @@ impl MpvNe {
                             }
                             if let Some(action) = self.bindings.double_left_click {
                                 return Task::done(action_to_message(action));
+                            }
+                        }
+                        // VR projection active: click-drag looks around
+                        // instead of panning/moving the window. Takes
+                        // priority over the flat zoom-pan below - the two
+                        // don't make sense combined.
+                        if self.video_projection != Projection::Flat {
+                            let over_video = self.cursor_pos.map(|(x, y)| {
+                                let controls_top = self.window_h_logical - CONTROLS_H as f32;
+                                let panel_left = self.window_w_logical
+                                    - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                                y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
+                            }).unwrap_or(false);
+                            if over_video {
+                                if let Some((x, y)) = self.cursor_pos {
+                                    self.vr_drag_start = Some((x, y, self.vr_yaw, self.vr_pitch));
+                                }
+                                return Task::none();
                             }
                         }
                         // Zoomed in: click-drag over the video pans it instead
@@ -4264,6 +4552,7 @@ impl MpvNe {
     /// fires for the outgoing file will be ignored (transitioning = true) so
     /// it cannot clear the new path or paused state we are about to set.
     fn open_next(&mut self, path: String) {
+        self.kill_ytdlp_download();
         self.save_resume();
         self.transitioning = true;
         let pb = std::path::PathBuf::from(&path);
@@ -4275,6 +4564,68 @@ impl MpvNe {
             crate::win32_modal::update_smtc_metadata(&name);
         }
         self.player.open(path);
+    }
+
+    /// Alternate "Open URL" path for sites whose CDN blocks direct
+    /// hotlinking (mpv/ffmpeg opening the resolved stream URL itself gets
+    /// a 403) even though yt-dlp can fetch the same URL just fine - yt-dlp
+    /// ships a browser-fingerprint-impersonating HTTP client for exactly
+    /// this class of site, which mpv's own network stack has no equivalent
+    /// of. Works around it by having yt-dlp actually download to a local
+    /// temp file and having mpv read that file while it's still growing,
+    /// instead of mpv fetching the stream directly.
+    fn open_via_ytdlp_download(&mut self, url: String) -> Task<Message> {
+        let Some(ytdl) = ytdl_binary() else {
+            return Task::done(Message::ShowOsd("yt-dlp not found".into()));
+        };
+        self.kill_ytdlp_download();
+
+        let tmp = std::env::temp_dir().join(format!("mpvne_dl_{}.mp4", std::process::id()));
+        let max_height = self.stream_quality_height;
+        let format_spec = if max_height == 0 {
+            "bestvideo[vcodec!*=av01]+bestaudio/best".to_string()
+        } else {
+            format!(
+                "bestvideo[vcodec!*=av01][height<=?{max_height}]+bestaudio/best[height<=?{max_height}]"
+            )
+        };
+
+        let mut cmd = std::process::Command::new(&ytdl);
+        cmd.args(["--no-check-formats", "-f", &format_spec, "--no-part", "-o"])
+            .arg(&tmp)
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                self.ytdlp_download = Some((child, tmp.clone()));
+                self.pending_ytdlp_open = Some(tmp);
+                self.recent_files.record(&std::path::PathBuf::from(&url));
+                self.recent_files.save();
+                Task::done(Message::ShowOsd("Downloading via yt-dlp...".into()))
+            }
+            Err(e) => Task::done(Message::ShowOsd(format!("yt-dlp failed to start: {e}"))),
+        }
+    }
+
+    /// Kill any in-flight `open_via_ytdlp_download` subprocess and remove
+    /// its temp file. Called whenever playback moves on to something else
+    /// (Stop, opening a new file/URL, app exit) so an abandoned download
+    /// doesn't keep running or leave a stray temp file behind.
+    fn kill_ytdlp_download(&mut self) {
+        self.pending_ytdlp_open = None;
+        if let Some((mut child, path)) = self.ytdlp_download.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     /// Shrink the window to match the video area that is *currently visible*
@@ -4392,6 +4743,14 @@ impl MpvNe {
             subs.push(
                 iced::time::every(std::time::Duration::from_secs(2))
                     .map(|_| Message::LiveEdgeTick),
+            );
+        }
+        // Poll the yt-dlp-download temp file until it's ready to play, or
+        // until the process exits (see open_via_ytdlp_download).
+        if self.pending_ytdlp_open.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(300))
+                    .map(|_| Message::YtdlpDownloadPollTick),
             );
         }
         // Poll file size every 3s while a file is loaded so we can extrapolate
@@ -4929,7 +5288,7 @@ fn mpv_stream(key: &StreamKey) -> BoxStream<'static, Message> {
         PlayerEvent::Position(p) => Message::PositionChanged(p),
         PlayerEvent::Duration(d) => Message::DurationChanged(d),
         PlayerEvent::FileLoaded => Message::FileLoaded,
-        PlayerEvent::EndFile => Message::EndFile,
+        PlayerEvent::EndFile(is_error) => Message::EndFile(is_error),
         PlayerEvent::EofReached(v) => Message::EofReached(v),
         PlayerEvent::Pause(p) => Message::PauseChanged(p),
         PlayerEvent::Frame(px, w, h) => Message::FrameReady(px, w, h),

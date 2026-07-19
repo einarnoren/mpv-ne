@@ -24,7 +24,7 @@ use super::{
     AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_BUTTON, BG_DEEPEST, BG_HOVER,
     BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED,
 };
-use crate::app::{AfterPlayback, FrameMode, Message, MpvNe};
+use crate::app::{AfterPlayback, FrameMode, Message, MpvNe, Projection, StereoOutput, StereoSource};
 use crate::player::{AudioTrack, SubTrack};
 
 /// Everything the settings panel reads, copied out of `MpvNe`/`Player` so
@@ -74,6 +74,10 @@ struct SettingsSnapshot {
     video_hflip: bool,
     video_vflip: bool,
     has_video: bool,
+    stereo_source: StereoSource,
+    stereo_output: StereoOutput,
+    projection: Projection,
+    vr_fov_deg: f32,
 
     ab_loop_a: Option<f64>,
     ab_loop_b: Option<f64>,
@@ -125,6 +129,10 @@ impl SettingsSnapshot {
             video_hflip: app.video_hflip,
             video_vflip: app.video_vflip,
             has_video: p.width > 0 && p.height > 0,
+            stereo_source: app.video_stereo_source,
+            stereo_output: app.video_stereo_output,
+            projection: app.video_projection,
+            vr_fov_deg: app.vr_fov_deg,
 
             ab_loop_a: app.ab_loop_a,
             ab_loop_b: app.ab_loop_b,
@@ -185,6 +193,10 @@ impl std::hash::Hash for SettingsSnapshot {
         self.video_rotate.hash(state);
         self.video_hflip.hash(state);
         self.video_vflip.hash(state);
+        self.stereo_source.hash(state);
+        self.stereo_output.hash(state);
+        self.projection.hash(state);
+        self.vr_fov_deg.to_bits().hash(state);
         self.has_video.hash(state);
 
         hash_opt_f64(self.ab_loop_a, state);
@@ -196,11 +208,56 @@ impl std::hash::Hash for SettingsSnapshot {
 }
 
 /// Docked panel view: includes its own header with a close button.
+/// Category name paired with an approximate relative scroll offset (0.0-1.0)
+/// where that category's section starts - used by the quick-nav row below
+/// so clicking a category jumps straight to it instead of manual scrolling.
+/// These are hand-calibrated estimates against the panel's typical content
+/// length, not exact measurements (iced has no "scroll to this widget" API,
+/// only offset-based scrolling) - close enough to be useful, and the small
+/// drift from e.g. a longer audio/subtitle track list is minor.
+const CATEGORY_ANCHORS: &[(&str, f32)] = &[
+    ("Playback", 0.0),
+    ("Audio", 0.15),
+    ("Subtitles", 0.32),
+    ("Video", 0.52),
+    ("Control", 0.78),
+    ("Other", 0.93),
+];
+
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let header = container(
         text("Playback settings").size(13).color(TEXT_BRIGHT),
     )
     .padding([8, 12])
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(BG_SURFACE)),
+        ..Default::default()
+    });
+
+    let nav = container(
+        row(CATEGORY_ANCHORS.iter().map(|(label, y)| {
+            button(text(*label).size(10).color(TEXT_MUTED))
+                .padding([3, 6])
+                .style(|_, status| {
+                    use iced::widget::button::Status;
+                    let bg = match status {
+                        Status::Hovered | Status::Pressed => BG_HOVER,
+                        _ => BG_BUTTON,
+                    };
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
+                        ..Default::default()
+                    }
+                })
+                .on_press(Message::SettingsJumpTo(*y))
+                .into()
+        }))
+        .spacing(4)
+        .wrap(),
+    )
+    .padding([4, 12])
     .width(Length::Fill)
     .style(|_| container::Style {
         background: Some(iced::Background::Color(BG_SURFACE)),
@@ -216,13 +273,21 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // poll, etc). Any of those causing so much as one conditional element
     // elsewhere in the tree to appear/disappear is enough to make iced lose
     // track of this scrollable and snap it back to the top mid-scroll.
+    // Even with the id, so many of this panel's own controls change a value
+    // that's part of the snapshot driving `lazy` above that interacting
+    // with almost anything still risked losing the scroll position - so
+    // app.rs's `update` now also explicitly restores it (via on_scroll
+    // below feeding `settings_scroll_offset`) after every message while
+    // this panel is open, rather than relying on iced to always get it
+    // right on its own.
     let body = scrollable(body_content)
         .id("settings_scroll")
+        .on_scroll(|viewport| Message::SettingsScrolled(viewport.relative_offset()))
         .width(Length::Fill)
         .height(Length::Fill);
 
     container(
-        column![header, body].width(Length::Fill).height(Length::Fill),
+        column![header, nav, body].width(Length::Fill).height(Length::Fill),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -382,6 +447,18 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         section_sub("Zoom", "When zoomed in, click-drag the video to pan around", zoom_row(app)),
         gap(),
         section("Rotate / flip", transform_row(app)),
+        gap(),
+        section_sub(
+            "3D / Stereoscopic",
+            "For side-by-side or over-under 3D sources - shown as a single flat frame otherwise",
+            stereo_3d_rows(app),
+        ),
+        gap(),
+        section_sub(
+            "VR / 360° projection",
+            "For 360°/180° panorama sources (VR video) - click-drag the video to look around",
+            vr_projection_rows(app),
+        ),
         gap(),
         section("Window size", window_size_row(app)),
         gap(),
@@ -888,6 +965,127 @@ fn after_playback_row(app: &SettingsSnapshot) -> Element<'static, Message> {
         opt("Close",      AfterPlayback::ClosePlayer),
     ]
     .spacing(4)
+    .into()
+}
+
+fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
+    let source_opt = |label: &'static str, val: StereoSource| {
+        let active = app.stereo_source == val;
+        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
+        button(text(label).size(11).color(color))
+            .padding([4, 8])
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        width: if active { 1.0 } else { 0.0 },
+                        radius: iced::border::Radius::new(4.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::SetStereoSource(val))
+    };
+    let output_opt = |label: &'static str, val: StereoOutput| {
+        let active = app.stereo_output == val;
+        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
+        button(text(label).size(11).color(color))
+            .padding([4, 8])
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        width: if active { 1.0 } else { 0.0 },
+                        radius: iced::border::Radius::new(4.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::SetStereoOutput(val))
+    };
+
+    column![
+        row![
+            text("Source").size(11).color(TEXT_MUTED),
+            Space::new().width(Length::Fixed(6.0)),
+            source_opt("Mono (2D)",      StereoSource::Mono),
+            source_opt("Side-by-side",   StereoSource::SideBySide),
+            source_opt("Over-under",     StereoSource::OverUnder),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+        row![
+            text("Output").size(11).color(TEXT_MUTED),
+            Space::new().width(Length::Fixed(6.0)),
+            output_opt("Left eye",   StereoOutput::LeftEye),
+            output_opt("Right eye",  StereoOutput::RightEye),
+            output_opt("Anaglyph",   StereoOutput::AnaglyphRedCyan),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn vr_projection_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
+    let proj_opt = |label: &'static str, val: Projection| {
+        let active = app.projection == val;
+        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
+        button(text(label).size(11).color(color))
+            .padding([4, 8])
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    border: iced::Border {
+                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        width: if active { 1.0 } else { 0.0 },
+                        radius: iced::border::Radius::new(4.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::SetProjection(val))
+    };
+
+    column![
+        row![
+            proj_opt("Flat (2D/3D)", Projection::Flat),
+            proj_opt("360°",         Projection::Equirect360),
+            proj_opt("180°",         Projection::Equirect180),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+        row![
+            text("Field of view").size(11).color(TEXT_MUTED),
+            Space::new().width(Length::Fixed(6.0)),
+            nudge_btn("-5°", Message::VrFovAdjust(-5.0)),
+            value_label(format!("{:.0}°", app.vr_fov_deg)),
+            nudge_btn("+5°", Message::VrFovAdjust(5.0)),
+            Space::new().width(Length::Fill),
+            reset_btn(Message::VrResetView),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(8)
     .into()
 }
 

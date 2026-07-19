@@ -75,7 +75,11 @@ pub enum PlayerEvent {
     Position(f64),
     Duration(f64),
     FileLoaded,
-    EndFile,
+    /// `true` if mpv ended the file because of an actual error (stream
+    /// open failure, decode error, etc.) rather than reaching a normal EOF
+    /// or being stopped/quit - used to auto-retry a failed URL via the
+    /// yt-dlp-download fallback. See `Message::EndFile`.
+    EndFile(bool),
     EofReached(bool),
     Pause(bool),
     Frame(Vec<u8>, u32, u32), // rgba pixels, width, height
@@ -682,6 +686,13 @@ impl Player {
             )
         };
         set_opt_str(self.handle.0, "ytdl-format", &spec);
+        // Many sites' CDNs reject yt-dlp's lightweight pre-flight
+        // availability check (a HEAD/range probe) even though the actual
+        // format is perfectly playable - yt-dlp's own documented
+        // workaround is to skip that check entirely. Without this, such
+        // sites fail with "Requested format is not available" despite
+        // every listed format actually working.
+        set_opt_str(self.handle.0, "ytdl-raw-options", "no-check-formats=");
     }
 
     pub fn set_rotate(&mut self, degrees: i64) {
@@ -750,6 +761,14 @@ impl Player {
         // idle placeholder icon instead.
         self.path = Some(url.to_string());
         self.vf_slots.clear();
+        // Some sites' CDNs reject the actual stream request unless it
+        // carries a Referer matching the site (anti-hotlinking) - yt-dlp
+        // itself knows to send this when extracting, but mpv's built-in
+        // ytdl_hook doesn't always forward it through to the final resolved
+        // URL's own HTTP request, causing an otherwise-fine stream to fail
+        // with a 403. Setting it ourselves from the original page URL is a
+        // safe, generic default that doesn't affect sites that don't care.
+        set_opt_str(self.handle.0, "referrer", url);
         command(self.handle.0, &["loadfile", url]);
         // See `open()`'s doc comment - mpv's own `pause` property, not just
         // our tracked flag, needs to be explicitly cleared.
@@ -955,7 +974,13 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                 let _ = tx.send(PlayerEvent::Chapters(chapters));
             }
             sys::mpv_event_id_MPV_EVENT_END_FILE => {
-                let _ = tx.send(PlayerEvent::EndFile);
+                let is_error = if ev.data.is_null() {
+                    false
+                } else {
+                    let end = unsafe { &*(ev.data as *const sys::mpv_event_end_file) };
+                    end.reason as u32 == sys::mpv_end_file_reason_MPV_END_FILE_REASON_ERROR
+                };
+                let _ = tx.send(PlayerEvent::EndFile(is_error));
             }
             sys::mpv_event_id_MPV_EVENT_LOG_MESSAGE => {
                 if ev.data.is_null() {
@@ -1157,6 +1182,14 @@ fn init_and_render_loop(
 
     let mut last_w: u32 = 0;
     let mut last_h: u32 = 0;
+    // Small free-list of render buffers, reused instead of allocating fresh
+    // every frame - at 4K that's ~33MB allocated+zeroed 30x/sec for no
+    // reason. A buffer that gets sent to the UI is gone for good (the
+    // receiver owns it now), so this is a pool rather than a single reused
+    // buffer: capped at 2 so memory use stays bounded, and a fresh
+    // allocation only happens on the rare frame where the pool is empty
+    // (startup, or right after a resize invalidates the old size).
+    let mut buf_pool: Vec<Vec<u8>> = Vec::new();
     // Every decoded frame sent to the UI triggers a full iced view() rebuild
     // of the entire app (settings panel/menu included, whether visible or
     // not) - at 60fps source content that's 60 full-tree rebuilds/sec as a
@@ -1203,9 +1236,20 @@ fn init_and_render_loop(
         last_h = h;
 
         let stride = (w * 4) as usize;
-        // Pre-fill with opaque black so letterbox areas aren't transparent.
-        let mut buf = vec![0u8; stride * h as usize];
+        let needed_len = stride * h as usize;
+        let mut buf = buf_pool.pop().unwrap_or_default();
+        if buf.len() != needed_len {
+            buf.clear();
+            buf.resize(needed_len, 0);
+        }
+        // Pre-fill with opaque black so letterbox areas aren't transparent -
+        // needed every frame since a pooled buffer may carry a previous
+        // frame's pixels, and mpv only touches the actual video content
+        // area, leaving any letterbox border as whatever was already there.
         for px in buf.chunks_exact_mut(4) {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
             px[3] = 255;
         }
         let size = [w as i32, h as i32];
@@ -1230,6 +1274,8 @@ fn init_and_render_loop(
                 if tx.send(PlayerEvent::Frame(buf, w, h)).is_err() {
                     break;
                 }
+            } else if buf_pool.len() < 2 {
+                buf_pool.push(buf);
             }
         } else {
             tracing::warn!(rc, "mpv_render_context_render failed");

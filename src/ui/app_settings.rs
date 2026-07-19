@@ -36,6 +36,7 @@ struct AppSettingsSnapshot {
     auto_load_siblings: bool,
     single_instance: bool,
     minimize_to_tray: bool,
+    auto_retry_download: bool,
     /// Resolved key per `KEY_SLOTS` entry, in the same order - `None` means
     /// that slot is explicitly unbound.
     keybind_keys: Vec<Option<String>>,
@@ -65,6 +66,7 @@ impl AppSettingsSnapshot {
             auto_load_siblings: app.auto_load_siblings,
             single_instance: app.single_instance,
             minimize_to_tray: app.minimize_to_tray,
+            auto_retry_download: app.auto_retry_download,
             keybind_keys: KEY_SLOTS.iter()
                 .map(|(id, ..)| app.resolved_key_for_slot(id))
                 .collect(),
@@ -236,6 +238,7 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         toggle_row("Minimize to system tray", Some("Minimizing hides the window to a tray icon instead of the taskbar"), app.minimize_to_tray, Message::ToggleMinimizeToTray),
         toggle_row("Auto-load folder as playlist", Some("Queue other media files from the same folder when opening a file"), app.auto_load_siblings, Message::ToggleAutoLoadSiblings),
         toggle_row("Single instance", Some("Opening another file hands it off to the running window instead of starting a new one - requires restart"), app.single_instance, Message::ToggleSingleInstance),
+        toggle_row("Auto-retry failed URLs via download", Some("If a URL fails to open directly, automatically retry it via yt-dlp download instead of just failing"), app.auto_retry_download, Message::ToggleAutoRetryDownload),
     ]
     .spacing(0)
     .width(Length::Fill);

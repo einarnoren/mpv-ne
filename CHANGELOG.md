@@ -6,6 +6,56 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.6] — 2026-07-19
+
+3D/VR video support, a couple of real render-pipeline performance fixes,
+Playback settings panel UX improvements, streaming reliability fixes for
+sites whose CDN blocks direct playback, and a few smaller playback features.
+
+### Playback
+- **Jump to next/previous subtitle** - seek directly to the next or
+  previous subtitle line's timestamp.
+- **Speed step customisation** - the increment used by the speed up/down
+  keys and nudge buttons is now adjustable, same pattern as the existing
+  seek-step size.
+
+### 3D / VR
+- Stereoscopic 3D: pick the source layout (mono/side-by-side/over-under)
+  and how it's displayed (left eye, right eye, or red-cyan anaglyph).
+- 360°/180° projection unwrap for VR video - click-drag to look around,
+  adjustable field of view, composes with stereoscopic mode for VR180-3D
+  sources.
+
+### Performance
+- The player's render loop now reuses a small pool of frame buffers
+  instead of allocating and zeroing a fresh one every frame (a meaningful
+  cost at 4K, 30x/sec).
+- The GPU texture upload now skips re-sending a frame that's already been
+  uploaded - previously, any UI redraw not caused by a new video frame
+  (cursor movement, opening a menu) still re-uploaded the same pixel data.
+
+### Playback settings panel
+- Scroll position is now explicitly preserved across interactions -
+  previously, many of the panel's own controls could bounce the view back
+  to the top.
+- A category quick-nav row (Playback/Audio/Subtitles/Video/Control/Other)
+  jumps straight to a section instead of manual scrolling.
+
+### Streaming / URL playback
+- Fixed a startup rendering glitch where the controls bar could render
+  incompletely and stay that way until something forced a redraw (e.g. a
+  manual resize) - a couple of automatic follow-up redraws shortly after
+  launch now self-heal it.
+- The Referer header and `--no-check-formats` are now set for URL
+  playback, fixing sites whose CDN rejects yt-dlp's lightweight
+  availability check, or requires a Referer, while direct playback
+  actually works fine.
+- New "fetch via yt-dlp download" option for URLs whose CDN blocks direct
+  hotlinking outright (checkbox in the Open URL dialog, or automatic
+  retry-on-failure - toggle in App Settings).
+
+---
+
 ## [0.4.5] — 2026-07-18
 
 Windows shell integration (system tray, taskbar thumbnail buttons, media

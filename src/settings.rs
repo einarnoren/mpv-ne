@@ -166,6 +166,11 @@ pub struct InterfaceSettings {
     /// icon instead of the taskbar. Click/double-click the icon to restore;
     /// right-click for a Restore/Exit menu.
     pub minimize_to_tray: bool,
+    /// Automatically retry a failed URL open via the yt-dlp-download
+    /// fallback instead of just failing (some sites' CDNs block mpv from
+    /// fetching the resolved stream URL directly, even though yt-dlp can).
+    #[serde(default = "default_auto_retry_download")]
+    pub auto_retry_download: bool,
     /// Preset ids (see `app::MOUSE_ACTION_PRESETS`) for the 4 mouse
     /// triggers on the video area.
     #[serde(default = "default_mouse_single_click")]
@@ -178,6 +183,7 @@ pub struct InterfaceSettings {
     pub mouse_scroll_down: String,
 }
 
+fn default_auto_retry_download() -> bool { true }
 fn default_mouse_single_click() -> String { "none".into() }
 fn default_mouse_double_click() -> String { "toggle_fullscreen".into() }
 fn default_mouse_scroll_up() -> String { "volume_up_2".into() }
@@ -200,6 +206,7 @@ impl Default for InterfaceSettings {
             auto_load_siblings: true,
             single_instance: false,
             minimize_to_tray: false,
+            auto_retry_download: true,
             mouse_single_click: default_mouse_single_click(),
             mouse_double_click: default_mouse_double_click(),
             mouse_scroll_up: default_mouse_scroll_up(),

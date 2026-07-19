@@ -965,11 +965,31 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         )
         .on_right_press(Message::ModalRightClick);
 
+        let download_toggle: Element<'_, Message> = if modal.kind == crate::app::ModalKind::OpenUrl {
+            mouse_area(
+                row![
+                    text(if modal.download_mode { "\u{2611}" } else { "\u{2610}" })
+                        .size(13)
+                        .color(if modal.download_mode { AURORA_TEAL } else { TEXT_MUTED }),
+                    text("Fetch via yt-dlp download (for sites that block direct streaming)")
+                        .size(10)
+                        .color(TEXT_MUTED),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .on_press(Message::ToggleModalDownloadMode)
+            .into()
+        } else {
+            Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(0.0)).into()
+        };
+
         let dialog = container(
             column![
                 text(modal.title).size(14).color(TEXT_BRIGHT),
                 text(modal.prompt).size(11).color(TEXT_MUTED),
                 input,
+                download_toggle,
                 row![
                     Space::new().width(Length::Fill),
                     button(text("Cancel").size(12).color(TEXT_MUTED))
