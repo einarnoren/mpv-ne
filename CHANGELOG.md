@@ -6,6 +6,21 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.7] — 2026-07-19
+
+Small follow-ups to the streaming/VR work from 0.4.6.
+
+- **VR field-of-view zoom** - Shift+Scroll adjusts FOV while a 360°/180°
+  projection is active, without conflicting with Ctrl+Scroll's existing
+  seek behaviour.
+- **Stream quality changes now reload the current URL** - changing the
+  quality cap while a URL is already playing used to have no visible
+  effect until the next open, since mpv only resolves the stream format
+  at load time. It now re-opens the same URL at the new cap and resumes
+  from the current position automatically.
+
+---
+
 ## [0.4.6] — 2026-07-19
 
 3D/VR video support, a couple of real render-pipeline performance fixes,

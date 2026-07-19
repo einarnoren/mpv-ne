@@ -530,6 +530,11 @@ pub struct MpvNe {
     /// mpv emits before our state catches up are dropped. Cleared on Play
     /// or when a new file finishes loading.
     pub stopped: bool,
+    /// Set when a URL is reloaded because the stream-quality cap changed
+    /// mid-playback - seeked to once the reload's `FileLoaded` fires, so
+    /// changing quality doesn't restart playback from 0:00. See
+    /// `Message::StreamQualitySet`.
+    pending_quality_resume_pos: Option<f64>,
     /// Pre-decoded image handles - created once to avoid re-uploading every frame.
     pub img_icon: iced::widget::image::Handle,
     pub img_logo: iced::widget::image::Handle,
@@ -856,6 +861,7 @@ impl Default for MpvNe {
             pip_prev_pinned: false,
             subs_menu_open: false,
             stopped: false,
+            pending_quality_resume_pos: None,
             img_logo: iced::widget::image::Handle::from_bytes(
                 include_bytes!("../assets/MPV_NE_logo_hires.png").to_vec(),
             ),
@@ -1912,6 +1918,9 @@ impl MpvNe {
                             Message::LiveDurationProbed(0.0)
                         },
                     ));
+                }
+                if let Some(pos) = self.pending_quality_resume_pos.take() {
+                    tasks.push(Task::done(Message::ResumePosition(pos)));
                 }
                 // Check for a saved resume position and seek to it (if enabled).
                 if self.resume_enabled {
@@ -3794,6 +3803,18 @@ impl MpvNe {
                 let mut prefs = crate::settings::Settings::load();
                 prefs.streaming.quality_height = height;
                 prefs.save();
+                // mpv only resolves the actual stream format when a URL is
+                // opened - just changing the option doesn't affect whatever
+                // is already streaming. Reload the same URL at the new cap
+                // and resume from the current position instead of leaving
+                // the user to notice and manually reopen it.
+                if let Some(url) = self.player.path.clone() {
+                    if url.starts_with("http") {
+                        self.pending_quality_resume_pos = Some(self.player.position);
+                        self.player.open_url(&url);
+                        return Task::done(Message::ShowOsd("Reloading stream at new quality...".into()));
+                    }
+                }
             }
             Message::ToggleChrome => {
                 let was_visible = self.chrome_visible();
@@ -4058,6 +4079,13 @@ impl MpvNe {
                 if self.keyboard_modifiers.control() {
                     let secs = if dy > 0.0 { 5.0 } else { -5.0 };
                     self.player.seek_relative(secs);
+                    return Task::none();
+                }
+                // Shift+scroll = VR field-of-view zoom, only meaningful
+                // while a 360/180 projection is active.
+                if self.keyboard_modifiers.shift() && self.video_projection != Projection::Flat {
+                    let delta = if dy > 0.0 { -5.0 } else { 5.0 };
+                    self.vr_fov_deg = (self.vr_fov_deg + delta).clamp(30.0, 130.0);
                     return Task::none();
                 }
                 let action = if dy > 0.0 {
