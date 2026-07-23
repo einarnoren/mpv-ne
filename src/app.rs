@@ -619,6 +619,10 @@ pub struct MpvNe {
     /// Automatically retry a failed URL open via the yt-dlp-download
     /// fallback (see `open_via_ytdlp_download`) instead of just failing.
     pub auto_retry_download: bool,
+    /// GPU (OpenGL) video rendering setting - persisted and shown in
+    /// Settings, but only takes effect on restart (the render loop is
+    /// spawned once per stream from a global flag - see gl_render.rs).
+    pub gl_render: bool,
     /// URL waiting on `download_ytdlp` to finish before it can be opened -
     /// set when a URL needs yt-dlp and it isn't available yet - see
     /// `Message::ModalConfirm`'s `ModalKind::OpenUrl` arm and
@@ -897,6 +901,7 @@ impl Default for MpvNe {
             auto_load_siblings: prefs.interface.auto_load_siblings,
             single_instance: prefs.interface.single_instance,
             auto_retry_download: prefs.interface.auto_retry_download,
+            gl_render: prefs.interface.gl_render,
             pending_ytdl_url: None,
             ytdlp_download: None,
             pending_ytdlp_open: None,
@@ -980,6 +985,8 @@ impl Default for MpvNe {
         app.player.set_eq_enabled(prefs.audio.eq_enabled);
         #[cfg(target_os = "windows")]
         crate::win32_modal::set_snap_enabled(app.snap_to_edge);
+        #[cfg(target_os = "windows")]
+        crate::gl_render::set_gl_render_enabled(prefs.interface.gl_render);
         // If a previous session already auto-downloaded yt-dlp, use it
         // without waiting to discover that again on first URL open.
         if let Some(path) = ytdl_local_path() {
@@ -1184,6 +1191,7 @@ pub enum Message {
     ModalInput(String),
     ToggleModalDownloadMode,
     ToggleAutoRetryDownload,
+    ToggleGlRender,
     /// Poll the pending yt-dlp-download temp file until it has enough
     /// bytes to start playback. See `open_via_ytdlp_download`.
     YtdlpDownloadPollTick,
@@ -1705,6 +1713,7 @@ impl MpvNe {
                                 single_instance: self.single_instance,
                                 minimize_to_tray: self.minimize_to_tray,
                                 auto_retry_download: self.auto_retry_download,
+                                gl_render: self.gl_render,
                                 mouse_single_click: self.mouse_bindings.single_click.clone(),
                                 mouse_double_click: self.mouse_bindings.double_click.clone(),
                                 mouse_scroll_up: self.mouse_bindings.scroll_up.clone(),
@@ -2653,6 +2662,19 @@ impl MpvNe {
                 let mut prefs = crate::settings::Settings::load();
                 prefs.interface.auto_retry_download = self.auto_retry_download;
                 prefs.save();
+            }
+            Message::ToggleGlRender => {
+                self.gl_render = !self.gl_render;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.gl_render = self.gl_render;
+                prefs.save();
+                // Takes effect on restart - the render loop is spawned once
+                // per stream from the global flag set at boot.
+                return Task::done(Message::ShowOsd(if self.gl_render {
+                    "GPU rendering on (restart to apply)".into()
+                } else {
+                    "GPU rendering off (restart to apply)".into()
+                }));
             }
             Message::ModalRightClick => {
                 if self.modal.is_some() {

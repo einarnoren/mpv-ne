@@ -600,12 +600,23 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
             ..Default::default()
         });
 
+    // `base` spans the full window width, including the docked Playback
+    // panel when it's open (not detached into its own window) - without
+    // accounting for that, "align right" anchors against the panel's own
+    // right edge instead of the video area's, landing the stats box on
+    // top of the panel's content instead of over the video.
+    let panel_w = if app.active_panel.is_some() && app.panel_window_id.is_none() {
+        SETTINGS_PANEL_W
+    } else {
+        0.0
+    };
+
     let layer = container(panel)
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(Horizontal::Right)
         .align_y(Vertical::Top)
-        .padding(Padding { top: 54.0, right: 16.0, left: 0.0, bottom: 0.0 });
+        .padding(Padding { top: 54.0, right: 16.0 + panel_w, left: 0.0, bottom: 0.0 });
 
     stack![base, layer].width(Length::Fill).height(Length::Fill).into()
 }

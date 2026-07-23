@@ -13,6 +13,7 @@ mod settings;
 mod ui;
 #[cfg(target_os = "windows")]
 mod win32_modal;
+mod gl_render;
 
 use app::MpvNe;
 use tracing_subscriber::EnvFilter;

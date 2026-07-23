@@ -115,12 +115,12 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 - Visual effects and animations
 - Customisable button layout
 - Mini player mode + audio spectrum visualizer (built, not yet merged)
-- GPU zero-copy rendering (native mpv OpenGL/D3D11 render API + wgpu interop) to cut CPU/GPU frame round-tripping at high resolutions like 4K
+- GPU zero-copy rendering: GPU-side video rendering via mpv's OpenGL path is done (opt-in "GPU video rendering" setting); the remaining step is true zero-copy interop into wgpu to also eliminate the frame read-back
 - Linux and macOS support (untested)
 
 ## Version
 
-0.4.7 - see [CHANGELOG](CHANGELOG.md)
+0.4.8 - see [CHANGELOG](CHANGELOG.md)
 
 ## Licence
 

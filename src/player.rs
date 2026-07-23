@@ -127,6 +127,13 @@ impl Drop for Handle {
 }
 
 impl Handle {
+    /// Raw handle for callers outside this module that need to pass it
+    /// directly to a libmpv-sys function (e.g. gl_render.rs's alternate
+    /// render context) - everything else should go through a proper method.
+    pub(crate) fn raw(&self) -> *mut sys::mpv_handle {
+        self.0
+    }
+
     pub fn is_paused(&self) -> bool {
         let name = CString::new("pause").unwrap();
         let mut flag: std::os::raw::c_int = 0;
@@ -930,7 +937,28 @@ pub fn event_stream(key: &StreamKey) -> BoxStream<'static, PlayerEvent> {
                 let h = Arc::clone(&key.handle);
                 let rs = Arc::clone(&key.render_size);
                 let tx2 = tx.clone();
-                std::thread::spawn(move || init_and_render_loop(h, rs, tx2));
+                // Phase 1 of the GPU zero-copy rendering effort (see
+                // gl_render.rs). Opt-in via the "GPU video rendering"
+                // Interface setting (or the MPVNE_GL_RENDER=1 dev env var).
+                // If the OpenGL path fails to initialize on this machine,
+                // the render thread falls back to the software loop in the
+                // same thread, so playback is never left with no renderer.
+                #[cfg(target_os = "windows")]
+                let use_gl = crate::gl_render::gl_render_wanted();
+                #[cfg(not(target_os = "windows"))]
+                let use_gl = false;
+                if use_gl {
+                    std::thread::spawn(move || {
+                        if !crate::gl_render::init_and_render_loop_gl(
+                            Arc::clone(&h), Arc::clone(&rs), tx2.clone(),
+                        ) {
+                            tracing::warn!("gl_render: init failed, falling back to software renderer");
+                            init_and_render_loop(h, rs, tx2);
+                        }
+                    });
+                } else {
+                    std::thread::spawn(move || init_and_render_loop(h, rs, tx2));
+                }
 
                 rx.recv().await.map(|e| (e, State::Running(rx)))
             }

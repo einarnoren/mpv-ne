@@ -37,6 +37,7 @@ struct AppSettingsSnapshot {
     single_instance: bool,
     minimize_to_tray: bool,
     auto_retry_download: bool,
+    gl_render: bool,
     /// Resolved key per `KEY_SLOTS` entry, in the same order - `None` means
     /// that slot is explicitly unbound.
     keybind_keys: Vec<Option<String>>,
@@ -67,6 +68,7 @@ impl AppSettingsSnapshot {
             single_instance: app.single_instance,
             minimize_to_tray: app.minimize_to_tray,
             auto_retry_download: app.auto_retry_download,
+            gl_render: app.gl_render,
             keybind_keys: KEY_SLOTS.iter()
                 .map(|(id, ..)| app.resolved_key_for_slot(id))
                 .collect(),
@@ -239,6 +241,7 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         toggle_row("Auto-load folder as playlist", Some("Queue other media files from the same folder when opening a file"), app.auto_load_siblings, Message::ToggleAutoLoadSiblings),
         toggle_row("Single instance", Some("Opening another file hands it off to the running window instead of starting a new one - requires restart"), app.single_instance, Message::ToggleSingleInstance),
         toggle_row("Auto-retry failed URLs via download", Some("If a URL fails to open directly, automatically retry it via yt-dlp download instead of just failing"), app.auto_retry_download, Message::ToggleAutoRetryDownload),
+        toggle_row("GPU video rendering", Some("Render video on the GPU (OpenGL) instead of the CPU - much smoother for 4K. Requires restart; falls back to CPU automatically if unsupported"), app.gl_render, Message::ToggleGlRender),
     ]
     .spacing(0)
     .width(Length::Fill);
@@ -310,9 +313,12 @@ fn toggle_row(label: &'static str, note: Option<&'static str>, active: bool, msg
         text(label).size(12).color(TEXT_BRIGHT).into()
     };
 
+    // Give the label/description column the flexible width and a small gap
+    // before the button, so long descriptions wrap *within* their column
+    // instead of running underneath the On/Off button on the right.
     let row_content = row![
-        label_col,
-        Space::new().width(Length::Fill),
+        container(label_col).width(Length::Fill),
+        Space::new().width(Length::Fixed(12.0)),
         onoff_btn(active, msg),
     ]
     .align_y(iced::Alignment::Center)
