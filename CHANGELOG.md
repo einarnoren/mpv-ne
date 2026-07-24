@@ -11,13 +11,12 @@ session, so this represents the full feature history.
 Optional GPU video rendering - a big smoothness win for high-resolution
 (4K) playback.
 
-### GPU video rendering (Windows, opt-in)
-- New **"GPU video rendering"** setting (Interface) renders video through
-  mpv's OpenGL path, so the GPU does the YUV->RGB conversion and scaling
-  instead of the CPU. On 4K content this takes dropped frames from
-  hundreds down to zero in testing.
-- **Off by default and restart-required** for now, since it's new - it'll
-  be validated across more hardware before becoming the default.
+### GPU video rendering (Windows)
+- Video now renders through mpv's OpenGL path, so the GPU does the
+  YUV->RGB conversion and scaling instead of the CPU. On 4K content this
+  takes dropped frames from hundreds down to zero in testing.
+- **On by default**, with a **"GPU video rendering"** toggle in Interface
+  settings to turn it off (restart-required to change).
 - **Falls back automatically** to the CPU software renderer if OpenGL
   can't initialize (old machines, Remote Desktop, no usable GL driver) -
   no black screen, just the previous behaviour. Works on integrated GPUs,

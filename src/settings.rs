@@ -173,10 +173,10 @@ pub struct InterfaceSettings {
     pub auto_retry_download: bool,
     /// Windows-only: render video via mpv's OpenGL embedder API (GPU does
     /// the YUV->RGB conversion and scaling) instead of the CPU software
-    /// renderer. Much smoother for high-resolution (4K) content. Off by
-    /// default and restart-required, since it's newer; falls back to the
-    /// software renderer automatically if OpenGL init fails.
-    #[serde(default)]
+    /// renderer. Much smoother for high-resolution (4K) content. On by
+    /// default (a config that explicitly set it off is respected); falls
+    /// back to the software renderer automatically if OpenGL init fails.
+    #[serde(default = "default_gl_render")]
     pub gl_render: bool,
     /// Preset ids (see `app::MOUSE_ACTION_PRESETS`) for the 4 mouse
     /// triggers on the video area.
@@ -191,6 +191,7 @@ pub struct InterfaceSettings {
 }
 
 fn default_auto_retry_download() -> bool { true }
+fn default_gl_render() -> bool { true }
 fn default_mouse_single_click() -> String { "none".into() }
 fn default_mouse_double_click() -> String { "toggle_fullscreen".into() }
 fn default_mouse_scroll_up() -> String { "volume_up_2".into() }
@@ -214,7 +215,7 @@ impl Default for InterfaceSettings {
             single_instance: false,
             minimize_to_tray: false,
             auto_retry_download: true,
-            gl_render: false,
+            gl_render: true,
             mouse_single_click: default_mouse_single_click(),
             mouse_double_click: default_mouse_double_click(),
             mouse_scroll_up: default_mouse_scroll_up(),

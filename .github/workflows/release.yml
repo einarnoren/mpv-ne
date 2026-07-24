@@ -23,9 +23,24 @@ jobs:
         run: choco install 7zip -y
 
       - name: Download libmpv
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Authenticate the GitHub API metadata call - unauthenticated
+          # requests share a low per-IP rate limit that the shared CI
+          # runners routinely exhaust, which previously failed the build
+          # here with "API rate limit exceeded". Authenticated requests use
+          # the token's much higher limit. Retry a few times for transient
+          # network blips. The asset download itself is a signed CDN URL
+          # that needs no auth.
+          $headers = @{ 'User-Agent' = 'mpv-ne-ci'; 'Authorization' = "Bearer $env:GH_TOKEN" }
           $api = 'https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest'
-          $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'mpv-ne-ci' }
+          $rel = $null
+          for ($i = 0; $i -lt 5; $i++) {
+            try { $rel = Invoke-RestMethod -Uri $api -Headers $headers; break }
+            catch { Write-Host "libmpv metadata fetch attempt $($i+1) failed: $_"; Start-Sleep -Seconds 10 }
+          }
+          if ($null -eq $rel) { throw "Failed to fetch libmpv release metadata after retries" }
           $asset = $rel.assets | Where-Object { $_.name -like 'mpv-dev-x86_64-*.7z' } | Select-Object -First 1
           Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mpv-dev.7z
           7z e mpv-dev.7z libmpv-2.dll -y
