@@ -535,6 +535,10 @@ pub struct MpvNe {
     /// changing quality doesn't restart playback from 0:00. See
     /// `Message::StreamQualitySet`.
     pending_quality_resume_pos: Option<f64>,
+    /// Playback position carried across an app-initiated restart (see
+    /// `Message::RestartApp`), applied to the first file this instance
+    /// opens regardless of whether the resume setting is on.
+    pending_restart_seek: Option<f64>,
     /// Pre-decoded image handles - created once to avoid re-uploading every frame.
     pub img_icon: iced::widget::image::Handle,
     pub img_logo: iced::widget::image::Handle,
@@ -866,6 +870,9 @@ impl Default for MpvNe {
             subs_menu_open: false,
             stopped: false,
             pending_quality_resume_pos: None,
+            pending_restart_seek: std::env::var("MPVNE_RESTART_SEEK")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok()),
             img_logo: iced::widget::image::Handle::from_bytes(
                 include_bytes!("../assets/MPV_NE_logo_hires.png").to_vec(),
             ),
@@ -1192,6 +1199,10 @@ pub enum Message {
     ToggleModalDownloadMode,
     ToggleAutoRetryDownload,
     ToggleGlRender,
+    /// Relaunch the app, reopening whatever is currently playing. Used to
+    /// apply restart-required settings without making the user do it by
+    /// hand - see `Message::ToggleGlRender`.
+    RestartApp,
     /// Poll the pending yt-dlp-download temp file until it has enough
     /// bytes to start playback. See `open_via_ytdlp_download`.
     YtdlpDownloadPollTick,
@@ -1931,6 +1942,12 @@ impl MpvNe {
                 if let Some(pos) = self.pending_quality_resume_pos.take() {
                     tasks.push(Task::done(Message::ResumePosition(pos)));
                 }
+                // Position carried across an app-initiated restart (see
+                // Message::RestartApp) - honoured regardless of the resume
+                // setting, and only for the first file this instance opens.
+                if let Some(pos) = self.pending_restart_seek.take() {
+                    tasks.push(Task::done(Message::ResumePosition(pos)));
+                }
                 // Check for a saved resume position and seek to it (if enabled).
                 if self.resume_enabled {
                 if let Some(path) = &self.player.path.clone() {
@@ -2668,8 +2685,13 @@ impl MpvNe {
                 let mut prefs = crate::settings::Settings::load();
                 prefs.interface.gl_render = self.gl_render;
                 prefs.save();
-                // Takes effect on restart - the render loop is spawned once
-                // per stream from the global flag set at boot.
+                // Restart-required rather than applied live: mpv's render
+                // API expects one render context for the process lifetime.
+                // Swapping it on a live handle works while playing, but a
+                // *paused* video is left black - the new video output never
+                // gets fed the current frame, and mpv won't emit one while
+                // paused (seeks and frame-steps are both swallowed). Not
+                // worth a hacky repaint kick for a setting changed rarely.
                 return Task::done(Message::ShowOsd(if self.gl_render {
                     "GPU rendering on (restart to apply)".into()
                 } else {
@@ -3294,6 +3316,63 @@ impl MpvNe {
 
             Message::Noop => {}
 
+            Message::RestartApp => {
+                // Save state and spawn a fresh copy of ourselves before
+                // exiting, passing the currently-open file so it reopens
+                // where it left off (position/tracks/volume come back via
+                // resume_db, which save_resume just wrote). Detached, so it
+                // survives this process exiting a moment later.
+                self.save_resume();
+                self.kill_ytdlp_download();
+                match std::env::current_exe() {
+                    Ok(exe) => {
+                        let mut cmd = std::process::Command::new(exe);
+                        if let Some(path) = self.player.path.clone() {
+                            cmd.arg(path);
+                            // Carry the position explicitly rather than
+                            // relying on the resume feature, so a restart
+                            // returns to the same spot even for users who
+                            // have "resume playback" turned off (losing
+                            // their place on an app-initiated restart would
+                            // be surprising, unlike on a normal reopen).
+                            if self.player.position > 1.0 {
+                                cmd.env("MPVNE_RESTART_SEEK", self.player.position.to_string());
+                            }
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            const DETACHED_PROCESS: u32 = 0x0000_0008;
+                            cmd.creation_flags(DETACHED_PROCESS);
+                        }
+                        if let Err(e) = cmd.spawn() {
+                            tracing::error!(?e, "restart: failed to spawn new instance");
+                            return Task::done(Message::ShowOsd(
+                                "Couldn't restart automatically - please reopen manually".into(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(?e, "restart: current_exe() failed");
+                        return Task::done(Message::ShowOsd(
+                            "Couldn't restart automatically - please reopen manually".into(),
+                        ));
+                    }
+                }
+                self.player.quit();
+                let mut tasks = Vec::new();
+                if let Some(id) = self.window_id {
+                    tasks.push(iced::window::close(id));
+                }
+                if let Some(panel_id) = self.panel_window_id {
+                    tasks.push(iced::window::close(panel_id));
+                }
+                if let Some(settings_id) = self.app_settings_window_id {
+                    tasks.push(iced::window::close(settings_id));
+                }
+                tasks.push(iced::exit());
+                return Task::batch(tasks);
+            }
             Message::CloseRequested(id) => {
                 if Some(id) == self.window_id {
                     self.save_resume();

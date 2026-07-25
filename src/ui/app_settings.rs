@@ -241,7 +241,7 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         toggle_row("Auto-load folder as playlist", Some("Queue other media files from the same folder when opening a file"), app.auto_load_siblings, Message::ToggleAutoLoadSiblings),
         toggle_row("Single instance", Some("Opening another file hands it off to the running window instead of starting a new one - requires restart"), app.single_instance, Message::ToggleSingleInstance),
         toggle_row("Auto-retry failed URLs via download", Some("If a URL fails to open directly, automatically retry it via yt-dlp download instead of just failing"), app.auto_retry_download, Message::ToggleAutoRetryDownload),
-        toggle_row("GPU video rendering", Some("Render video on the GPU (OpenGL) instead of the CPU - much smoother for 4K. Requires restart; falls back to CPU automatically if unsupported"), app.gl_render, Message::ToggleGlRender),
+        toggle_row("GPU video rendering", Some("Render video on the GPU (OpenGL) instead of the CPU - much smoother for 4K. Takes effect on restart; falls back to CPU automatically if unsupported"), app.gl_render, Message::ToggleGlRender),
     ]
     .spacing(0)
     .width(Length::Fill);
@@ -259,6 +259,12 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
                 border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
                 ..Default::default()
             }),
+        gap(),
+        settings_section(
+            "Restart",
+            "Some settings (like GPU video rendering) only take effect after a restart - this reopens the app where you left off",
+            action_btn("Restart now", Message::RestartApp, AURORA_GREEN),
+        ),
         gap(),
         settings_section(
             "File associations",

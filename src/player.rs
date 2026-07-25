@@ -3,7 +3,7 @@ use std::{
     hash::{Hash, Hasher},
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Condvar, Mutex,
     },
 };
@@ -148,6 +148,29 @@ impl Handle {
         flag != 0
     }
 
+    /// Force mpv to re-decode and re-output the current frame. Used right
+    /// after the render context is recreated during a live renderer switch:
+    /// without it, a *paused* video stays black, because the freshly-created
+    /// video output hasn't been fed the current frame yet and mpv won't
+    /// signal a new one while paused. Uses an *absolute* exact seek to the
+    /// current time - a relative-zero seek gets optimized away by mpv
+    /// (especially while paused) and does nothing. Harmless during playback
+    /// (a momentary re-seek).
+    pub(crate) fn redraw_nudge(&self) {
+        if !self.is_paused() {
+            // Playing: new frames arrive on their own, nothing to force.
+            return;
+        }
+        // Paused: try to force a decode so a recreated video output isn't
+        // left black. Note this is best-effort - in practice mpv swallows
+        // these while paused after a render-context swap, which is why the
+        // GPU-rendering toggle is restart-required rather than live (see
+        // Message::ToggleGlRender). Kept for the GL-failure fallback path,
+        // where it costs nothing to try.
+        command(self.0, &["frame-back-step"]);
+        command(self.0, &["frame-step"]);
+    }
+
     pub fn set_pause(&self, paused: bool) {
         let name = CString::new("pause").unwrap();
         let mut flag: std::os::raw::c_int = paused as _;
@@ -169,13 +192,32 @@ pub struct RenderSize {
     /// frame, so the render loop wakes either way.
     pub wake_flag: Mutex<bool>,
     pub wake_cv: Condvar,
+    /// Set to ask the currently-running render loop to tear down and return
+    /// `RenderExit::Restart`, so the render supervisor can re-spawn the
+    /// other backend. Used to switch between the software and OpenGL
+    /// renderers live (see `request_restart` / the supervisor in
+    /// `event_stream`) without restarting the app.
+    pub restart: AtomicBool,
 }
 
 impl RenderSize {
-    fn signal(&self) {
+    pub(crate) fn signal(&self) {
         *self.wake_flag.lock().unwrap() = true;
         self.wake_cv.notify_one();
     }
+
+}
+
+/// Why a render loop returned - drives the render supervisor in
+/// `event_stream`, which either stops or re-spawns the appropriate backend.
+pub enum RenderExit {
+    /// The event channel closed (app shutting down) - stop supervising.
+    Shutdown,
+    /// A backend switch was requested (toggle) or the current backend
+    /// failed mid-run - re-read the desired backend and run again. After a
+    /// GL failure `gl_render_wanted()` is false, so this cleanly falls back
+    /// to software.
+    Restart,
 }
 
 /// Passed to `Subscription::run_with` as the stable key.
@@ -358,6 +400,7 @@ impl Player {
                     h: AtomicU32::new(0),
                     wake_flag: Mutex::new(false),
                     wake_cv: Condvar::new(),
+                    restart: AtomicBool::new(false),
                 }),
                 path: None,
                 paused: true,
@@ -422,6 +465,7 @@ impl Player {
         // hasn't produced a new frame (e.g. while paused).
         self.render_size.signal();
     }
+
 
     pub fn open(&mut self, path: impl Into<String>) {
         let path = path.into();
@@ -937,27 +981,39 @@ pub fn event_stream(key: &StreamKey) -> BoxStream<'static, PlayerEvent> {
                 let h = Arc::clone(&key.handle);
                 let rs = Arc::clone(&key.render_size);
                 let tx2 = tx.clone();
-                // Phase 1 of the GPU zero-copy rendering effort (see
-                // gl_render.rs). Opt-in via the "GPU video rendering"
-                // Interface setting (or the MPVNE_GL_RENDER=1 dev env var).
-                // If the OpenGL path fails to initialize on this machine,
-                // the render thread falls back to the software loop in the
-                // same thread, so playback is never left with no renderer.
-                #[cfg(target_os = "windows")]
-                let use_gl = crate::gl_render::gl_render_wanted();
-                #[cfg(not(target_os = "windows"))]
-                let use_gl = false;
-                if use_gl {
+                // Render supervisor: picks the software or OpenGL render
+                // backend and runs it, re-picking whenever a loop returns
+                // `Restart` (a live "GPU video rendering" toggle, or a GL
+                // failure). This is what lets the setting apply without an
+                // app restart - see gl_render.rs and RenderSize::request_restart.
+                // On non-Windows there's no GL path, so it's always software.
+                {
+                    let h = Arc::clone(&h);
+                    let rs = Arc::clone(&rs);
+                    let tx2 = tx2.clone();
                     std::thread::spawn(move || {
-                        if !crate::gl_render::init_and_render_loop_gl(
-                            Arc::clone(&h), Arc::clone(&rs), tx2.clone(),
-                        ) {
-                            tracing::warn!("gl_render: init failed, falling back to software renderer");
-                            init_and_render_loop(h, rs, tx2);
+                        let mut is_restart = false;
+                        loop {
+                            #[cfg(target_os = "windows")]
+                            let want_gl = crate::gl_render::gl_render_wanted();
+                            #[cfg(not(target_os = "windows"))]
+                            let want_gl = false;
+
+                            let exit = if want_gl {
+                                #[cfg(target_os = "windows")]
+                                { crate::gl_render::init_and_render_loop_gl(
+                                    Arc::clone(&h), Arc::clone(&rs), tx2.clone(), is_restart) }
+                                #[cfg(not(target_os = "windows"))]
+                                { unreachable!() }
+                            } else {
+                                init_and_render_loop(Arc::clone(&h), Arc::clone(&rs), tx2.clone(), is_restart)
+                            };
+                            match exit {
+                                RenderExit::Shutdown => break,
+                                RenderExit::Restart => { is_restart = true; continue; }
+                            }
                         }
                     });
-                } else {
-                    std::thread::spawn(move || init_and_render_loop(h, rs, tx2));
                 }
 
                 rx.recv().await.map(|e| (e, State::Running(rx)))
@@ -1185,7 +1241,8 @@ fn init_and_render_loop(
     handle: Arc<Handle>,
     render_size: Arc<RenderSize>,
     tx: UnboundedSender<PlayerEvent>,
-) {
+    is_restart: bool,
+) -> RenderExit {
     let mut ctx: *mut sys::mpv_render_context = std::ptr::null_mut();
     let api = b"sw\0";
     let mut init_params = [
@@ -1197,7 +1254,9 @@ fn init_and_render_loop(
     };
     if rc != 0 {
         tracing::error!(rc, "mpv_render_context_create failed");
-        return;
+        // Nothing to tear down and no way to render - treat as shutdown so
+        // the supervisor doesn't spin retrying a broken software renderer.
+        return RenderExit::Shutdown;
     }
     tracing::info!("SW render context ready");
 
@@ -1206,6 +1265,18 @@ fn init_and_render_loop(
     let cb_ptr = Box::into_raw(cb_box) as *mut std::ffi::c_void;
     unsafe {
         sys::mpv_render_context_set_update_callback(ctx, Some(wakeup_cb), cb_ptr);
+    }
+    // Prime an immediate first render so a freshly-(re)started render loop
+    // paints the current frame right away instead of waiting for mpv's next
+    // frame signal - without this, a live backend switch shows black until
+    // the next decoded frame arrives (and never repaints at all while paused).
+    render_size.signal();
+    // On a live switch, also force mpv to re-output the current frame into
+    // the just-created video output (see Handle::redraw_nudge) - otherwise a
+    // paused video stays black. Skipped on the very first start, where mpv
+    // outputs frames on its own as the file loads.
+    if is_restart {
+        handle.redraw_nudge();
     }
 
     let mut last_w: u32 = 0;
@@ -1233,6 +1304,7 @@ fn init_and_render_loop(
         .unwrap_or_else(std::time::Instant::now);
     const FRAME_THROTTLE: std::time::Duration = std::time::Duration::from_millis(33);
 
+    let exit_reason;
     loop {
         // Wait for either mpv (new frame) or set_render_size (resize) to signal.
         {
@@ -1241,6 +1313,12 @@ fn init_and_render_loop(
                 flag = render_size.wake_cv.wait(flag).unwrap();
             }
             *flag = false;
+        }
+
+        // A live renderer switch was requested (see RenderSize::request_restart).
+        if render_size.restart.swap(false, Ordering::SeqCst) {
+            exit_reason = RenderExit::Restart;
+            break;
         }
 
         let w = render_size.w.load(Ordering::Relaxed);
@@ -1300,6 +1378,7 @@ fn init_and_render_loop(
             if should_send {
                 last_frame_sent = now;
                 if tx.send(PlayerEvent::Frame(buf, w, h)).is_err() {
+                    exit_reason = RenderExit::Shutdown;
                     break;
                 }
             } else if buf_pool.len() < 2 {
@@ -1315,6 +1394,7 @@ fn init_and_render_loop(
         drop(Box::from_raw(cb_ptr as *mut Arc<RenderSize>));
         sys::mpv_render_context_free(ctx);
     }
+    exit_reason
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

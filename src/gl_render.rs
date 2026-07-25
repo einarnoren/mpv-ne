@@ -386,22 +386,21 @@ pub fn gl_render_unavailable() -> bool {
 /// through the same `PlayerEvent::Frame` path the software renderer uses -
 /// see the module doc comment for why.
 ///
-/// Returns `true` if the OpenGL path initialized successfully and ran (the
-/// caller should NOT start the software loop). Returns `false` if it failed
-/// to even initialize (context/render-context creation) - the caller should
-/// fall back to the software renderer so playback isn't left with no render
-/// loop running at all. Mid-loop failures set the `gl_render_unavailable`
-/// flag (so the *next* file uses software) but still return `true`, since
-/// the mpv render context already exists and a clean handoff mid-stream
-/// isn't worth the added complexity for that rare case.
+/// Returns a [`RenderExit`] telling the render supervisor what to do next.
+/// `Shutdown` = the event channel closed (app exiting). `Restart` = a live
+/// backend switch was requested, OR the OpenGL path failed (init or
+/// mid-loop) - in the failure case `gl_render_unavailable()` is now set, so
+/// the supervisor's re-pick cleanly falls back to the software renderer.
 pub fn init_and_render_loop_gl(
     handle: std::sync::Arc<crate::player::Handle>,
     render_size: std::sync::Arc<crate::player::RenderSize>,
     tx: tokio::sync::mpsc::UnboundedSender<PlayerEvent>,
-) -> bool {
+    is_restart: bool,
+) -> crate::player::RenderExit {
+    use crate::player::RenderExit;
     let Some(gl) = GlContext::create() else {
         GL_RENDER_FAILED.store(true, Ordering::Relaxed);
-        return false;
+        return RenderExit::Restart;
     };
 
     let mut init_params = sys::mpv_opengl_init_params {
@@ -424,7 +423,7 @@ pub fn init_and_render_loop_gl(
     if rc != 0 {
         tracing::error!(rc, "gl_render: mpv_render_context_create (opengl) failed");
         GL_RENDER_FAILED.store(true, Ordering::Relaxed);
-        return false;
+        return RenderExit::Restart;
     }
     tracing::info!("gl_render: OpenGL render context ready");
 
@@ -432,6 +431,13 @@ pub fn init_and_render_loop_gl(
     let cb_ptr = Box::into_raw(cb_box) as *mut std::ffi::c_void;
     unsafe {
         sys::mpv_render_context_set_update_callback(ctx, Some(gl_wakeup_cb), cb_ptr);
+    }
+    // Prime an immediate first render so a freshly-(re)started render loop
+    // paints the current frame right away instead of waiting for mpv's next
+    // frame signal - see the matching comment in player::init_and_render_loop.
+    render_size.signal();
+    if is_restart {
+        handle.redraw_nudge();
     }
 
     let fns = &gl.fns;
@@ -444,6 +450,7 @@ pub fn init_and_render_loop_gl(
         .unwrap_or_else(std::time::Instant::now);
     const FRAME_THROTTLE: std::time::Duration = std::time::Duration::from_millis(33);
 
+    let exit_reason;
     loop {
         {
             let mut flag = render_size.wake_flag.lock().unwrap();
@@ -451,6 +458,12 @@ pub fn init_and_render_loop_gl(
                 flag = render_size.wake_cv.wait(flag).unwrap();
             }
             *flag = false;
+        }
+
+        // A live renderer switch was requested (see RenderSize::request_restart).
+        if render_size.restart.swap(false, Ordering::SeqCst) {
+            exit_reason = RenderExit::Restart;
+            break;
         }
 
         let w = render_size.w.load(std::sync::atomic::Ordering::Relaxed);
@@ -462,6 +475,7 @@ pub fn init_and_render_loop_gl(
         if !gl.make_current() {
             tracing::error!("gl_render: wglMakeCurrent failed mid-loop");
             GL_RENDER_FAILED.store(true, Ordering::Relaxed);
+            exit_reason = RenderExit::Restart;
             break;
         }
 
@@ -492,6 +506,7 @@ pub fn init_and_render_loop_gl(
                 if status != GL_FRAMEBUFFER_COMPLETE {
                     tracing::error!(status, "gl_render: FBO incomplete");
                     GL_RENDER_FAILED.store(true, Ordering::Relaxed);
+                    exit_reason = RenderExit::Restart;
                     break;
                 }
             }
@@ -541,6 +556,7 @@ pub fn init_and_render_loop_gl(
             }
         }
         if tx.send(PlayerEvent::Frame(buf, w, h)).is_err() {
+            exit_reason = RenderExit::Shutdown;
             break;
         }
     }
@@ -553,9 +569,5 @@ pub fn init_and_render_loop_gl(
             (fns.delete_textures)(1, &tex);
         }
     }
-    // Reached only after successful init - the render context existed and
-    // the loop exited normally (channel closed) or on a rare mid-loop GL
-    // error. Either way, don't have the caller start a second (software)
-    // loop; the failure flag already routes the next file to software.
-    true
+    exit_reason
 }

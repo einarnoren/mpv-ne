@@ -16,11 +16,19 @@ Optional GPU video rendering - a big smoothness win for high-resolution
   YUV->RGB conversion and scaling instead of the CPU. On 4K content this
   takes dropped frames from hundreds down to zero in testing.
 - **On by default**, with a **"GPU video rendering"** toggle in Interface
-  settings to turn it off (restart-required to change).
+  settings to turn it off. Takes effect on restart - mpv's render API
+  expects a single render context per process, and swapping it live leaves
+  a paused video black.
 - **Falls back automatically** to the CPU software renderer if OpenGL
   can't initialize (old machines, Remote Desktop, no usable GL driver) -
   no black screen, just the previous behaviour. Works on integrated GPUs,
   not just dedicated cards.
+
+### Restart
+- New **"Restart now"** button (Interface settings) relaunches the app and
+  reopens the current file at the same position, so restart-required
+  settings can be applied without doing it by hand. The position is
+  carried across explicitly, so it works even with "resume playback" off.
 
 ### Fixes
 - The stats overlay no longer overlaps the docked Playback panel when it's
