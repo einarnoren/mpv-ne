@@ -544,6 +544,10 @@ pub struct MpvNe {
     /// `Message::RestartApp`), applied to the first file this instance
     /// opens regardless of whether the resume setting is on.
     pending_restart_seek: Option<f64>,
+    /// Why the current load failed, if it did - lifted from mpv's error log
+    /// (see `player::user_facing_error`). Cleared on each new load so a
+    /// stale reason can't be attributed to a later attempt.
+    last_load_error: Option<String>,
     /// Pre-decoded image handles - created once to avoid re-uploading every frame.
     pub img_icon: iced::widget::image::Handle,
     pub img_logo: iced::widget::image::Handle,
@@ -894,6 +898,7 @@ impl Default for MpvNe {
             pending_restart_seek: std::env::var("MPVNE_RESTART_SEEK")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok()),
+            last_load_error: None,
             img_logo: iced::widget::image::Handle::from_bytes(
                 include_bytes!("../assets/MPV_NE_logo_hires.png").to_vec(),
             ),
@@ -1060,6 +1065,9 @@ pub enum Message {
     DurationChanged(f64),
     FileLoaded,
     EndFile(bool),
+    /// Why a load failed, surfaced from mpv's error log - shown on the OSD
+    /// and kept so the failure reason survives until the next load.
+    LoadError(String),
     EofReached(bool),
     PauseChanged(bool),
     FrameReady(Vec<u8>, u32, u32),
@@ -1962,7 +1970,17 @@ impl MpvNe {
                     }
                 }
             }
+            Message::LoadError(reason) => {
+                // Keep only the first reason per load attempt: mpv often
+                // emits several error lines for one failure, and the first
+                // is the specific cause - later ones are consequences.
+                if self.last_load_error.is_none() {
+                    self.last_load_error = Some(reason.clone());
+                    return Task::done(Message::ShowOsd(reason));
+                }
+            }
             Message::FileLoaded => {
+                self.last_load_error = None;
                 self.stopped = false;
                 self.transitioning = false;
                 self.live_catching_up = false;
@@ -2147,11 +2165,21 @@ impl MpvNe {
                 {
                     // A direct URL open failed outright (not just reached
                     // EOF) - some sites block mpv/ffmpeg from fetching the
-                    // resolved stream URL directly even though yt-dlp can.
-                    // Retry once via the download fallback automatically
-                    // rather than making the user notice the failure and
-                    // manually re-open with the checkbox.
+                    // resolved stream URL directly even though a dedicated
+                    // extractor can. Retry automatically rather than making
+                    // the user notice the failure and re-open by hand.
                     let url = self.player.path.clone().unwrap();
+
+                    // Try streamlink first when it's installed: it only
+                    // resolves a URL (no download), so it's much cheaper than
+                    // the yt-dlp fallback, and it's strongest on live streams
+                    // which is where a direct open most often fails.
+                    if let Some(direct) = resolve_via_streamlink(&url) {
+                        tracing::info!("streamlink resolved a direct stream URL after failed open");
+                        self.player.open_url(&direct);
+                        return Task::done(Message::ShowOsd("Direct open failed - retrying via streamlink...".into()));
+                    }
+
                     return Task::batch([
                         Task::done(Message::ShowOsd("Direct open failed - retrying via yt-dlp download...".into())),
                         self.open_via_ytdlp_download(url),
@@ -2832,8 +2860,10 @@ impl MpvNe {
                                         Task::perform(download_ytdlp(), Message::YtdlpDownloadResult),
                                     ]);
                                 } else if m.download_mode {
+                                    self.last_load_error = None;
                                     return self.open_via_ytdlp_download(m.input);
                                 } else {
+                                    self.last_load_error = None;
                                     self.player.open_url(&m.input);
                                     self.recent_files.record(&std::path::PathBuf::from(&m.input));
                                     self.recent_files.save();
@@ -4815,6 +4845,9 @@ impl MpvNe {
     /// fires for the outgoing file will be ignored (transitioning = true) so
     /// it cannot clear the new path or paused state we are about to set.
     fn open_next(&mut self, path: String) {
+        // Start each load with a clean slate, so a reason from a previous
+        // failure can't be attributed to this attempt.
+        self.last_load_error = None;
         self.kill_ytdlp_download();
         self.save_resume();
         self.transitioning = true;
@@ -5118,13 +5151,92 @@ fn edge_direction_for(cursor: (f32, f32), w: f32, h: f32) -> Option<iced::window
 /// Not exhaustive (yt-dlp supports 1000+ sites), just the common cases
 /// people actually paste in here.
 fn needs_ytdl(url: &str) -> bool {
-    const EXTRACTOR_HOSTS: &[&str] = &[
-        "youtube.com", "youtu.be", "twitch.tv", "vimeo.com",
-        "dailymotion.com", "twitter.com", "x.com", "tiktok.com",
-        "facebook.com", "soundcloud.com", "reddit.com",
+    let lower = url.trim().to_ascii_lowercase();
+
+    // Only web pages need an extractor. Anything mpv can open directly -
+    // other protocols, or a local path - never does.
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+
+    // Strip query/fragment before looking at the extension, so
+    // ".../video.mp4?token=abc" is still recognised as direct media.
+    let path_part = lower
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(&lower);
+
+    // A direct link to media (or a manifest mpv's demuxer handles itself)
+    // needs no extractor.
+    const DIRECT_EXTS: &[&str] = &[
+        // Containers
+        ".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4v", ".flv", ".wmv", ".ts", ".m2ts",
+        // Streaming manifests - mpv/ffmpeg parse these natively
+        ".m3u8", ".mpd",
+        // Audio
+        ".mp3", ".flac", ".aac", ".opus", ".ogg", ".oga", ".wav", ".m4a",
     ];
-    let lower = url.to_ascii_lowercase();
-    EXTRACTOR_HOSTS.iter().any(|h| lower.contains(h))
+    if DIRECT_EXTS.iter().any(|ext| path_part.ends_with(ext)) {
+        return false;
+    }
+
+    // Everything else is a web page. Rather than matching a hand-written
+    // list of sites (which covered 11 of yt-dlp's ~1750 extractors, so
+    // anything else silently failed to trigger the auto-download), assume a
+    // page needs extracting. yt-dlp's generic/html5 extractors can also pull
+    // playable media out of arbitrary pages with no site-specific support,
+    // so this is worth attempting even for sites it doesn't know by name.
+    true
+}
+
+/// Whether `streamlink` is on PATH. It's a complement to yt-dlp rather than
+/// a replacement - far fewer sites, but often more robust on *live* streams,
+/// which is exactly where yt-dlp is weakest. Unlike yt-dlp we don't
+/// auto-download it (it's a Python package, not a single portable binary),
+/// so this is strictly opt-in: used only if the user already has it.
+fn streamlink_available() -> bool {
+    let mut cmd = std::process::Command::new("streamlink");
+    cmd.arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.status().is_ok_and(|s| s.success())
+}
+
+/// Ask streamlink to resolve a page URL to a directly-playable stream URL.
+/// Returns `None` if streamlink isn't installed, doesn't handle the site, or
+/// the stream isn't live. Cheap: this only resolves a URL, it doesn't
+/// download anything.
+fn resolve_via_streamlink(url: &str) -> Option<String> {
+    if !streamlink_available() {
+        return None;
+    }
+    let mut cmd = std::process::Command::new("streamlink");
+    cmd.args(["--stream-url", url, "best"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let resolved = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Guard against streamlink printing a diagnostic instead of a URL.
+    if resolved.starts_with("http://") || resolved.starts_with("https://") {
+        Some(resolved)
+    } else {
+        None
+    }
 }
 
 /// Whether yt-dlp or (as a fallback) youtube-dl is reachable on PATH -
@@ -5593,6 +5705,7 @@ fn mpv_stream(key: &StreamKey) -> BoxStream<'static, Message> {
         PlayerEvent::Position(p) => Message::PositionChanged(p),
         PlayerEvent::Duration(d) => Message::DurationChanged(d),
         PlayerEvent::FileLoaded => Message::FileLoaded,
+        PlayerEvent::LoadError(reason) => Message::LoadError(reason),
         PlayerEvent::EndFile(is_error) => Message::EndFile(is_error),
         PlayerEvent::EofReached(v) => Message::EofReached(v),
         PlayerEvent::Pause(p) => Message::PauseChanged(p),

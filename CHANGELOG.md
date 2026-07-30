@@ -6,6 +6,36 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.11] — 2026-07-31
+
+Better URL support, and failures that actually tell you what went wrong.
+
+### Streaming
+- **URL playback now covers every site yt-dlp supports.** The check for
+  "does this URL need an extractor?" matched a hand-written list of 11
+  hostnames, so a URL from any of yt-dlp's other ~1,750 supported sites
+  wouldn't trigger the automatic yt-dlp download. It's now inverted:
+  anything that isn't obviously direct media (`.mp4`, `.m3u8`, `.mpd`,
+  `rtsp://`, a local path, …) is treated as a page needing extraction.
+  This also lets yt-dlp's generic/HTML5 extractors attempt arbitrary pages
+  that have no site-specific support.
+- **Optional streamlink support.** If `streamlink` is on PATH it's tried
+  first when a direct open fails - it only resolves a URL rather than
+  downloading, and it's often more robust than yt-dlp on live streams.
+  Not auto-installed (it's a Python package, not a portable binary), so
+  it's used only if you already have it and is skipped silently otherwise.
+
+### Fixes
+- **Failed loads now explain themselves.** mpv and its extractor hook
+  report a precise cause - unsupported site, HTTP 403, region block,
+  needs an account, no playable format - but all of it only reached the
+  log, so playback just quietly didn't start. The reason is now shown on
+  screen, with mpv's generic follow-on lines ("Failed to recognize file
+  format.") filtered out so you see the actual cause rather than its
+  consequences.
+
+---
+
 ## [0.4.10] — 2026-07-30
 
 ### Fixes

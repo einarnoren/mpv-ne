@@ -75,6 +75,10 @@ pub enum PlayerEvent {
     Position(f64),
     Duration(f64),
     FileLoaded,
+    /// A human-readable reason a load failed, lifted out of mpv's error log
+    /// so the UI can show it instead of failing silently. See
+    /// `user_facing_error`.
+    LoadError(String),
     /// `true` if mpv ended the file because of an actual error (stream
     /// open failure, decode error, etc.) rather than reaching a normal EOF
     /// or being stopped/quit - used to auto-retry a failed URL via the
@@ -1091,6 +1095,14 @@ fn event_loop(handle: Arc<Handle>, tx: UnboundedSender<PlayerEvent>) {
                 match msg.log_level {
                     sys::mpv_log_level_MPV_LOG_LEVEL_FATAL | sys::mpv_log_level_MPV_LOG_LEVEL_ERROR => {
                         tracing::error!(prefix, "mpv: {text}");
+                        // Forward the *reason* a load failed so the UI can
+                        // show it. mpv and its ytdl_hook explain themselves
+                        // well ("Unsupported URL", HTTP status, codec
+                        // problems), but until now all of that only reached
+                        // the log - the user just saw playback not start.
+                        if let Some(reason) = user_facing_error(&prefix, text) {
+                            let _ = tx.send(PlayerEvent::LoadError(reason));
+                        }
                     }
                     _ => tracing::warn!(prefix, "mpv: {text}"),
                 }
@@ -1249,6 +1261,64 @@ const RPT_SW_POINTER: u32 = 20;
 unsafe extern "C" fn wakeup_cb(ctx: *mut std::ffi::c_void) {
     let arc = unsafe { &*(ctx as *const Arc<RenderSize>) };
     arc.signal();
+}
+
+/// Turn an mpv/ytdl_hook error line into something worth showing the user,
+/// or `None` for noise. mpv emits several lines per failure - a specific
+/// cause followed by generic consequences ("Failed to recognize file
+/// format.") - so this keeps the line that actually explains *why* and
+/// drops the rest, rewriting jargon into plain language where it helps.
+fn user_facing_error(prefix: &str, text: &str) -> Option<String> {
+    let t = text.trim();
+    let lower = t.to_ascii_lowercase();
+
+    // Generic follow-on messages: true, but they explain nothing on their
+    // own and would mask the real cause that arrived just before.
+    if lower.contains("failed to recognize file format")
+        || lower.contains("youtube-dl failed: unexpected error occurred")
+        || lower.contains("do not open issues")
+        || lower.contains("no video or audio streams selected")
+    {
+        return None;
+    }
+
+    if lower.contains("unsupported url") {
+        return Some("This site isn't supported by yt-dlp".into());
+    }
+    if lower.contains("[piracy]") {
+        return Some("yt-dlp has removed support for this site".into());
+    }
+    if lower.contains("http error 403") || lower.contains("403 forbidden") {
+        return Some("Server refused the request (HTTP 403)".into());
+    }
+    if lower.contains("http error 404") || lower.contains("404 not found") {
+        return Some("Not found (HTTP 404)".into());
+    }
+    if lower.contains("is not a valid url") || lower.contains("unable to download webpage") {
+        return Some("Couldn't reach that page - check the URL or your connection".into());
+    }
+    if lower.contains("requested format is not available") {
+        return Some("No playable format at the selected quality".into());
+    }
+    if lower.contains("private video") || lower.contains("sign in") || lower.contains("login") {
+        return Some("This needs an account or isn't public".into());
+    }
+    if lower.contains("geo") && lower.contains("restrict") {
+        return Some("Blocked in this region".into());
+    }
+    if lower.contains("live event will begin") || lower.contains("premieres in") {
+        return Some("This hasn't started streaming yet".into());
+    }
+
+    // Anything else from the extractor is usually already a plain-English
+    // sentence - pass it through, trimming yt-dlp's "ERROR: " prefix.
+    if prefix == "ytdl_hook" {
+        let cleaned = t.trim_start_matches("ERROR:").trim();
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
+    }
+    None
 }
 
 fn init_and_render_loop(
