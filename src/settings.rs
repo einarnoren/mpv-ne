@@ -318,8 +318,28 @@ impl Settings {
     }
 
     pub fn window_size(&self) -> Option<(f32, f32)> {
-        Some((self.window.w? as f32, self.window.h? as f32))
+        let (w, h) = (self.window.w? as f32, self.window.h? as f32);
+        // Reject a degenerate saved size rather than faithfully restoring it.
+        // A window this small can't have been chosen deliberately - it comes
+        // from a bad read during teardown/minimize - and restoring it opens
+        // the app as an unusable sliver every launch until the user manually
+        // resizes. Falling back to the default is always recoverable; opening
+        // at 237x39 effectively isn't. See also `is_sane_window_size`.
+        if !is_sane_window_size(w, h) {
+            tracing::warn!(w, h, "ignoring implausible saved window size");
+            return None;
+        }
+        Some((w, h))
     }
+}
+
+/// Smallest saved window size we'll trust, in physical pixels. Well under
+/// any sensible window but far above the degenerate values that show up when
+/// the size is sampled at the wrong moment.
+pub const MIN_SANE_WINDOW_PX: f32 = 200.0;
+
+pub fn is_sane_window_size(w: f32, h: f32) -> bool {
+    w.is_finite() && h.is_finite() && w >= MIN_SANE_WINDOW_PX && h >= MIN_SANE_WINDOW_PX
 }
 
 fn settings_path() -> Option<PathBuf> {

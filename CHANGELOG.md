@@ -6,6 +6,24 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.10] — 2026-07-30
+
+### Fixes
+- **The app could open as an unusable sliver of a window.** A degenerate
+  window size (e.g. 237x39) could be written to the config - most likely
+  sampled while the window was being torn down or minimized - and every
+  launch afterwards faithfully restored it. The controls bar looked broken
+  because it was a normal bar squeezed into a 39px-tall window, and
+  resizing only appeared to fix it because that saved a sane size back.
+  Implausible sizes are now rejected both when saving (so a bad sample
+  can't poison the config) and when loading (so an already-corrupted
+  config recovers on its own instead of staying stuck).
+- The window's cached size is now seeded before the first frame, so the
+  controls bar picks its responsive layout from the real width instead of
+  briefly laying out as if the window were zero-width.
+
+---
+
 ## [0.4.9] — 2026-07-29
 
 A batch of playback and UI features, plus a fix for screenshots landing

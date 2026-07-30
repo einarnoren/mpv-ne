@@ -1473,6 +1473,18 @@ impl MpvNe {
         let initial_scale: f32 = 1.0;
         let (logical_w, logical_h) = (w / initial_scale, h / initial_scale);
 
+        // Seed the cached window size *before* the first view() runs. They
+        // otherwise stay 0.0 until the first resize event arrives, and the
+        // controls bar picks its responsive layout from them (breakpoints at
+        // 650/750px), so the first paint would lay out as if the window were
+        // zero-width. Only safe now that `window_size()` validates what it
+        // loads - seeding straight from an unchecked saved value would just
+        // propagate a bad size into the first frame. Same reasoning for
+        // scale_factor, which apply_render_size() reads synchronously.
+        app.window_w_logical = logical_w;
+        app.window_h_logical = logical_h;
+        app.scale_factor = initial_scale;
+
         let settings = iced::window::Settings {
             size: iced::Size::new(logical_w, logical_h),
             position,
@@ -1729,6 +1741,16 @@ impl MpvNe {
                         // compounding a logical/physical mismatch.
                         let save_w = (save_w_logical * dpi).round() as u32;
                         let save_h = (self.window_h_logical.max(0.0) * dpi).round() as u32;
+                        // Never persist a degenerate size. These show up when
+                        // the window reports a near-zero extent (teardown,
+                        // minimize, an early resize event) and, once written,
+                        // every subsequent launch restores an unusable sliver
+                        // of a window. Skipping the save just keeps the last
+                        // good size, which is always the safer outcome.
+                        if !crate::settings::is_sane_window_size(save_w as f32, save_h as f32) {
+                            tracing::warn!(save_w, save_h, "skipping save of implausible window size");
+                            return Task::none();
+                        }
                         crate::settings::Settings {
                             window: crate::settings::WindowSettings {
                                 w: Some(save_w),
