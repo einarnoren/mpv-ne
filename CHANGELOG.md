@@ -6,6 +6,50 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.4.9] — 2026-07-29
+
+A batch of playback and UI features, plus a fix for screenshots landing
+somewhere you'd never find them.
+
+### Playback
+- **Shuffle is now non-destructive.** It used to physically reorder the
+  playlist, permanently losing the original order. It's now a mode: the
+  list keeps its real order and only playback order is randomised, with
+  Previous walking back through what actually played. The playlist panel's
+  Shuffle button shows as active while it's on, and the mode persists.
+- **A-B loop keyboard shortcut** - `L` cycles set A → set B → clear,
+  rebindable like any other key. The hint under the A-B buttons now reads
+  the *bound* key instead of naming keys that were actually assigned to
+  speed up/down.
+- **Screenshots** can now capture the clean video frame instead of what's
+  on screen, via a "Subtitles" toggle next to the button.
+
+### Interface
+- **Chapters panel** - new side-panel tab listing the file's chapters with
+  timestamps, highlighting the one you're in, click to jump, plus
+  prev/next buttons. The seek bar already marked chapters; this makes them
+  readable and navigable.
+- **The stats overlay can be dragged** anywhere in the window, and
+  remembers where you put it. Right-click it to snap back to the corner.
+- Stats now show which **renderer** is actually live (GPU or CPU) - the
+  GPU setting falls back silently when OpenGL isn't available, and there
+  was previously no way to tell which you had.
+
+### Fixes
+- **Screenshots were saving to an unpredictable folder.** The save
+  directory was never applied to mpv at startup unless you'd set one, so
+  mpv fell back to its own default: the process working directory,
+  wherever that happened to be for a GUI launch. Screenshots now go to
+  `Pictures\MPV-NE` by default, the folder is created if missing, and
+  Settings shows the real path instead of "Default folder".
+- Side-panel tabs no longer clip now that there are five of them.
+- Chapter panel no longer shows dead prev/next buttons for files without
+  chapters.
+- Loose images in the repository root are now ignored by git, so a stray
+  screenshot can't be committed by accident.
+
+---
+
 ## [0.4.8] — 2026-07-23
 
 Optional GPU video rendering - a big smoothness win for high-resolution

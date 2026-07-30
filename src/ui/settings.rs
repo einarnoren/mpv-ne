@@ -39,6 +39,7 @@ struct SettingsSnapshot {
     hwdec: String,
     loop_file: bool,
     loop_playlist: bool,
+    shuffle: bool,
     deinterlace: bool,
     precise_seek: bool,
     seek_step_secs: f64,
@@ -81,9 +82,13 @@ struct SettingsSnapshot {
 
     ab_loop_a: Option<f64>,
     ab_loop_b: Option<f64>,
+    /// Currently-bound key for the A-B loop action, so the hint text below
+    /// the buttons reflects rebinds instead of a hardcoded guess.
+    ab_loop_key: Option<String>,
     after_playback: AfterPlayback,
 
     screenshot_dir: String,
+    screenshot_subs: bool,
 }
 
 impl SettingsSnapshot {
@@ -94,6 +99,7 @@ impl SettingsSnapshot {
             hwdec: p.hwdec.clone(),
             loop_file: p.loop_file,
             loop_playlist: p.loop_playlist,
+            shuffle: app.shuffle,
             deinterlace: p.deinterlace,
             precise_seek: app.precise_seek,
             seek_step_secs: app.seek_step_secs,
@@ -136,9 +142,11 @@ impl SettingsSnapshot {
 
             ab_loop_a: app.ab_loop_a,
             ab_loop_b: app.ab_loop_b,
+            ab_loop_key: app.resolved_key_for_slot("ab_loop"),
             after_playback: app.after_playback,
 
             screenshot_dir: app.screenshot_dir.clone(),
+            screenshot_subs: app.screenshot_subs,
         }
     }
 }
@@ -159,6 +167,7 @@ impl std::hash::Hash for SettingsSnapshot {
         self.hwdec.hash(state);
         self.loop_file.hash(state);
         self.loop_playlist.hash(state);
+        self.shuffle.hash(state);
         self.deinterlace.hash(state);
         self.precise_seek.hash(state);
         hash_f64(self.seek_step_secs, state);
@@ -201,9 +210,11 @@ impl std::hash::Hash for SettingsSnapshot {
 
         hash_opt_f64(self.ab_loop_a, state);
         hash_opt_f64(self.ab_loop_b, state);
+        self.ab_loop_key.hash(state);
         self.after_playback.hash(state);
 
         self.screenshot_dir.hash(state);
+        self.screenshot_subs.hash(state);
     }
 }
 
@@ -542,6 +553,10 @@ fn options_row(app: &SettingsSnapshot) -> Element<'static, Message> {
         row![
             toggle_btn("Loop file",     app.loop_file,     Message::ToggleLoopFile,     AURORA_TEAL),
             toggle_btn("Loop playlist", app.loop_playlist, Message::ToggleLoopPlaylist, AURORA_TEAL),
+        ]
+        .spacing(6),
+        row![
+            toggle_btn("Shuffle", app.shuffle, Message::ToggleShuffle, AURORA_GREEN),
         ]
         .spacing(6),
         row![
@@ -1150,12 +1165,16 @@ fn ab_row(app: &SettingsSnapshot) -> Element<'static, Message> {
             .on_press(msg)
     };
 
+    // Read the *bound* key rather than hardcoding one - it's rebindable, and
+    // the old hardcoded hint here named keys that are actually bound to
+    // speed up/down, so it told users the wrong thing.
+    let key_hint = app.ab_loop_key.clone().unwrap_or_else(|| "unbound".into());
     let status_text = if ab_looping {
-        "Looping A→B"
+        format!("Looping A→B  ({key_hint} to clear)")
     } else if app.ab_loop_a.is_some() {
-        "A set — click B to start loop"
+        format!("A set — set B to start looping  ({key_hint})")
     } else {
-        "[ = set A,  ] = set B"
+        format!("{key_hint} = set A, then B, then clear")
     };
 
     let clear_el: Element<'static, Message> = if ab_active {
@@ -1273,21 +1292,31 @@ fn lang_input(value: String, on_input: impl Fn(String) -> Message + 'static) -> 
 }
 
 fn screenshot_section(app: &SettingsSnapshot) -> Element<'static, Message> {
-    let dir_label = if app.screenshot_dir.is_empty() {
-        "Default folder".to_string()
+    // Show the real, resolved folder - "Default folder" told the user
+    // nothing about where files actually landed.
+    let resolved = crate::app::effective_screenshot_dir(&app.screenshot_dir);
+    let dir_label = if resolved.is_empty() {
+        "mpv default (working folder)".to_string()
     } else {
-        // Show just the last component to keep it compact.
-        std::path::Path::new(&app.screenshot_dir)
-            .file_name()
-            .map(|n| format!("…/{}", n.to_string_lossy()))
-            .unwrap_or_else(|| app.screenshot_dir.clone())
+        resolved
     };
     column![
-        action_btn("Take screenshot", Message::TakeScreenshot, AURORA_GREEN),
         row![
-            text("Folder:").size(11).color(TEXT_MUTED),
-            Space::new().width(Length::Fixed(6.0)),
+            action_btn("Take screenshot", Message::TakeScreenshot, AURORA_GREEN),
+            toggle_btn(
+                "Subtitles",
+                app.screenshot_subs,
+                Message::ToggleScreenshotSubs,
+                AURORA_TEAL,
+            ),
+        ]
+        .spacing(4),
+        column![
+            text("Saves to:").size(11).color(TEXT_MUTED),
             text(dir_label).size(11).color(TEXT_BRIGHT),
+        ]
+        .spacing(2),
+        row![
             Space::new().width(Length::Fill),
             action_btn("Change…", Message::ChooseScreenshotDir, AURORA_TEAL),
         ]

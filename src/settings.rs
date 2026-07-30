@@ -57,6 +57,10 @@ pub struct PlaybackSettings {
     pub precise_seek: bool,
     /// Screenshot save directory. Empty = mpv default.
     pub screenshot_dir: String,
+    /// Whether screenshots include subtitles/OSD as seen on screen, or
+    /// capture the clean video frame underneath.
+    #[serde(default = "default_screenshot_subs")]
+    pub screenshot_subs: bool,
     /// Seconds a single seek-step covers (Left/Right keys, the transport
     /// skip buttons, and the menu's Back/Forward items all share this).
     pub seek_step_secs: f64,
@@ -72,6 +76,7 @@ impl Default for PlaybackSettings {
             volume: 100.0,
             precise_seek: true,
             screenshot_dir: String::new(),
+            screenshot_subs: default_screenshot_subs(),
             seek_step_secs: 5.0,
             speed_step: 0.1,
         }
@@ -178,6 +183,15 @@ pub struct InterfaceSettings {
     /// back to the software renderer automatically if OpenGL init fails.
     #[serde(default = "default_gl_render")]
     pub gl_render: bool,
+    /// Dragged position of the stats overlay in window coords. Absent =
+    /// the default top-right anchor. Both are set/cleared together.
+    #[serde(default)]
+    pub stats_pos_x: Option<f32>,
+    #[serde(default)]
+    pub stats_pos_y: Option<f32>,
+    /// Play the playlist in random order.
+    #[serde(default)]
+    pub shuffle: bool,
     /// Preset ids (see `app::MOUSE_ACTION_PRESETS`) for the 4 mouse
     /// triggers on the video area.
     #[serde(default = "default_mouse_single_click")]
@@ -192,6 +206,7 @@ pub struct InterfaceSettings {
 
 fn default_auto_retry_download() -> bool { true }
 fn default_gl_render() -> bool { true }
+fn default_screenshot_subs() -> bool { true }
 fn default_mouse_single_click() -> String { "none".into() }
 fn default_mouse_double_click() -> String { "toggle_fullscreen".into() }
 fn default_mouse_scroll_up() -> String { "volume_up_2".into() }
@@ -216,6 +231,9 @@ impl Default for InterfaceSettings {
             minimize_to_tray: false,
             auto_retry_download: true,
             gl_render: true,
+            stats_pos_x: None,
+            stats_pos_y: None,
+            shuffle: false,
             mouse_single_click: default_mouse_single_click(),
             mouse_double_click: default_mouse_double_click(),
             mouse_scroll_up: default_mouse_scroll_up(),
@@ -268,6 +286,7 @@ impl Settings {
                 volume: f64_of("volume", 100.0),
                 precise_seek: bool_of("precise_seek", true),
                 screenshot_dir: str_of("screenshot_dir"),
+                screenshot_subs: bool_of("screenshot_subs", true),
                 seek_step_secs: f64_of("seek_step_secs", 5.0),
                 speed_step: f64_of("speed_step", 0.1),
             },

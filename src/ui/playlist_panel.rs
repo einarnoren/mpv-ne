@@ -285,22 +285,34 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         }
     };
 
-    let shuffle_btn = button(text("Shuffle").size(11).color(AURORA_PURPLE))
-        .padding([3, 8])
-        .style(|_, status| {
-            use iced::widget::button::Status;
-            let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
-            };
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(bg)),
-                text_color: AURORA_PURPLE,
-                border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
-                ..Default::default()
-            }
-        })
-        .on_press(Message::ShufflePlaylist);
+    // Shuffle is a *mode*, not a one-shot reorder: the list keeps its real
+    // order (so you can still see and use it) and only playback order is
+    // randomised. Shows as active while on, since it now has state.
+    let shuffle_on = app.shuffle;
+    let shuffle_btn = button(
+        text("Shuffle")
+            .size(11)
+            .color(if shuffle_on { AURORA_PURPLE } else { TEXT_MUTED }),
+    )
+    .padding([3, 8])
+    .style(move |_, status| {
+        use iced::widget::button::Status;
+        let bg = match status {
+            Status::Hovered | Status::Pressed => BG_HOVER,
+            _ => if shuffle_on { BG_HOVER } else { BG_BUTTON },
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: if shuffle_on { AURORA_PURPLE } else { TEXT_MUTED },
+            border: iced::Border {
+                color: if shuffle_on { iced::Color { a: 0.4, ..AURORA_PURPLE } } else { iced::Color::TRANSPARENT },
+                width: if shuffle_on { 1.0 } else { 0.0 },
+                radius: iced::border::Radius::new(4.0),
+            },
+            ..Default::default()
+        }
+    })
+    .on_press(Message::ToggleShuffle);
 
     let sort_btn = button(text("Sort").size(11).color(TEXT_MUTED))
         .padding([3, 8])

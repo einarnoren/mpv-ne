@@ -32,9 +32,9 @@ pub struct AudioTrack {
 #[derive(Debug, Clone)]
 pub struct Chapter {
     pub time: f64,
-    /// Chapter name from the container. Not yet displayed in the UI but kept
-    /// for future tooltip use on the seek-bar tick marks.
-    #[allow(dead_code)]
+    /// Chapter name from the container, when it has one. Shown in the
+    /// Chapters panel; containers often omit these, so it falls back to a
+    /// numbered label there.
     pub title: Option<String>,
 }
 
@@ -207,6 +207,12 @@ impl RenderSize {
     }
 
 }
+
+/// True while the OpenGL render backend is the one actually running (as
+/// opposed to the setting merely being on - it may have fallen back to the
+/// software renderer). Surfaced in the stats overlay so there's an in-app
+/// way to confirm which renderer is live. Set by whichever loop starts.
+pub static RENDERER_IS_GPU: AtomicBool = AtomicBool::new(false);
 
 /// Why a render loop returned - drives the render supervisor in
 /// `event_stream`, which either stops or re-spawns the appropriate backend.
@@ -883,8 +889,16 @@ impl Player {
         set_opt_str(self.handle.0, "screenshot-directory", dir);
     }
 
+    /// Screenshot including subtitles and any applied video filters - what
+    /// you actually see on screen (mpv's "subtitles" mode).
     pub fn screenshot(&self) {
-        command(self.handle.0, &["screenshot"]);
+        command(self.handle.0, &["screenshot", "subtitles"]);
+    }
+
+    /// Screenshot of the video only, without subtitles or OSD burned in
+    /// (mpv's "video" mode).
+    pub fn screenshot_no_subs(&self) {
+        command(self.handle.0, &["screenshot", "video"]);
     }
 
     /// Switch HW decoding on/off at runtime. We toggle by reading the current
@@ -1259,6 +1273,7 @@ fn init_and_render_loop(
         return RenderExit::Shutdown;
     }
     tracing::info!("SW render context ready");
+    RENDERER_IS_GPU.store(false, Ordering::Relaxed);
 
     // Leak a Box<Arc<RenderSize>> for the C callback so it has a stable pointer.
     let cb_box = Box::new(Arc::clone(&render_size));

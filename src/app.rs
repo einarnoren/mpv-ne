@@ -64,6 +64,7 @@ pub enum PanelKind {
     Playlist,
     Browser,
     Recent,
+    Chapters,
     Settings,
 }
 
@@ -133,6 +134,8 @@ pub enum Action {
     SpeedStep(bool),
     /// Seek to the start of the next/previous subtitle line, forward if `true`.
     SubSeek(bool),
+    /// One-key A-B loop: set A, then B, then clear.
+    AbLoopCycle,
 }
 
 /// How the video frame is fitted into the window. Cycled with the Z key and
@@ -267,6 +270,7 @@ pub const KEY_SLOTS: &[(&str, &str, &str, Action)] = &[
     ("frame_step_fwd", "Step forward one frame", ".", Action::FrameStep(true)),
     ("sub_seek_prev", "Previous subtitle", "p", Action::SubSeek(false)),
     ("sub_seek_next", "Next subtitle", "n", Action::SubSeek(true)),
+    ("ab_loop", "A-B loop (set A / set B / clear)", "l", Action::AbLoopCycle),
 ];
 
 /// Maps every input trigger to an optional Action. `None` means the input is
@@ -420,6 +424,7 @@ fn action_to_message(a: Action) -> Message {
         Action::FrameStep(fwd) => Message::FrameStep(fwd),
         Action::SpeedStep(faster) => Message::SpeedStep(faster),
         Action::SubSeek(fwd) => Message::SubSeek(fwd),
+        Action::AbLoopCycle => Message::AbLoopCycle,
     }
 }
 
@@ -577,6 +582,9 @@ pub struct MpvNe {
     /// See `Settings::stream_quality_height`/`Player::set_stream_quality`.
     pub stream_quality_height: u32,
     pub screenshot_dir: String,
+    /// Whether screenshots capture subtitles/OSD as seen on screen, or the
+    /// clean video frame underneath. Persisted.
+    pub screenshot_subs: bool,
     /// Windows-only window-to-window/edge snapping while dragging. See
     /// `win32_modal::set_snap_enabled`/`Settings::interface.snap_to_edge`.
     pub snap_to_edge: bool,
@@ -787,6 +795,19 @@ pub struct MpvNe {
     /// When true, the stats overlay (bitrate/fps/dropped/buffer) is shown and
     /// polled on a timer. Toggled with the S key.
     pub show_stats: bool,
+    /// Custom position of the stats overlay in window coords, once the user
+    /// has dragged it. `None` = the default top-right anchor, which also
+    /// tracks the docked panel's width (see `ui::stack_stats`). Persisted.
+    /// Play the playlist in random order. Persisted. See `pick_shuffled_index`.
+    pub shuffle: bool,
+    /// Indices played before the current one while shuffling, so Previous
+    /// walks back through actual play order rather than list order.
+    shuffle_history: Vec<usize>,
+    pub stats_pos: Option<(f32, f32)>,
+    /// Set while dragging the stats overlay: `(cursor_x, cursor_y,
+    /// panel_x, panel_y)` captured at drag start, same pattern as
+    /// `pan_drag_start`/`vr_drag_start`.
+    stats_drag_start: Option<(f32, f32, f32, f32)>,
     /// How the video frame is fitted into the window (Fit/Fill/Stretch).
     /// Cycled with the Z key; resets to Fit on file load.
     pub frame_mode: FrameMode,
@@ -893,6 +914,7 @@ impl Default for MpvNe {
             speed_step: prefs.playback.speed_step,
             stream_quality_height: prefs.streaming.quality_height,
             screenshot_dir: prefs.playback.screenshot_dir.clone(),
+            screenshot_subs: prefs.playback.screenshot_subs,
             snap_to_edge: prefs.interface.snap_to_edge,
             remember_window: prefs.interface.remember_window,
             start_pinned_pref: prefs.interface.start_pinned,
@@ -967,6 +989,11 @@ impl Default for MpvNe {
             size_ref_duration: 0.0,
             probed_duration: 0.0,
             show_stats: false,
+            shuffle: prefs.interface.shuffle,
+            shuffle_history: Vec::new(),
+            stats_pos: prefs.interface.stats_pos_x
+                .zip(prefs.interface.stats_pos_y),
+            stats_drag_start: None,
             frame_mode: FrameMode::Fit,
             video_stereo_source: StereoSource::Mono,
             video_stereo_output: StereoOutput::LeftEye,
@@ -983,6 +1010,16 @@ impl Default for MpvNe {
         app.player.set_audio_normalize(app.audio_normalize);
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
         app.player.set_stream_quality(app.stream_quality_height);
+        // Point mpv at a real screenshot folder up front (creating it if
+        // needed - mpv won't) rather than leaving it at its working-directory
+        // default. See `effective_screenshot_dir`.
+        {
+            let shot_dir = effective_screenshot_dir(&app.screenshot_dir);
+            if !shot_dir.is_empty() {
+                let _ = std::fs::create_dir_all(&shot_dir);
+                app.player.set_screenshot_dir(&shot_dir);
+            }
+        }
         // Pad/truncate the saved gain list to the current band count rather
         // than erroring - lets `player::EQ_BANDS` grow later without
         // breaking older configs (same reasoning as the Settings migration).
@@ -1156,6 +1193,11 @@ pub enum Message {
     SubDelayChanged(f64),
     AudioDelayChanged(f64),
     TakeScreenshot,
+    /// Whether screenshots include subtitles (and OSD) or capture the clean
+    /// video frame. Applies to `TakeScreenshot`.
+    ToggleScreenshotSubs,
+    /// Play the playlist in random order.
+    ToggleShuffle,
     /// Toggle the stats overlay on/off.
     ToggleStats,
     /// Cycle the video framing: Fit → Fill → Stretch.
@@ -1203,6 +1245,11 @@ pub enum Message {
     /// apply restart-required settings without making the user do it by
     /// hand - see `Message::ToggleGlRender`.
     RestartApp,
+    /// Begin dragging the stats overlay. `(x, y)` is where it currently
+    /// sits, so the drag can be applied relative to that.
+    StatsDragStart(f32, f32),
+    /// Return the stats overlay to its default top-right anchor.
+    StatsResetPos,
     /// Poll the pending yt-dlp-download temp file until it has enough
     /// bytes to start playback. See `open_via_ytdlp_download`.
     YtdlpDownloadPollTick,
@@ -1241,7 +1288,6 @@ pub enum Message {
     ToggleDeinterlace,
     DeinterlaceChanged(bool),
     // Playlist operations
-    ShufflePlaylist,
     SortPlaylist(PlaylistSort),
     TogglePlaylistSort,
     TogglePanelsMenu,
@@ -1362,6 +1408,8 @@ pub enum Message {
     AbLoopSetA,
     AbLoopSetB,
     AbLoopClear,
+    /// One-key A-B loop: set A, then B, then clear. See its handler.
+    AbLoopCycle,
 }
 
 impl MpvNe {
@@ -1693,6 +1741,7 @@ impl MpvNe {
                                 volume: self.player.volume,
                                 precise_seek: self.precise_seek,
                                 screenshot_dir: self.screenshot_dir.clone(),
+                                screenshot_subs: self.screenshot_subs,
                                 seek_step_secs: self.seek_step_secs,
                                 speed_step: self.speed_step,
                             },
@@ -1725,6 +1774,9 @@ impl MpvNe {
                                 minimize_to_tray: self.minimize_to_tray,
                                 auto_retry_download: self.auto_retry_download,
                                 gl_render: self.gl_render,
+                                stats_pos_x: self.stats_pos.map(|(x, _)| x),
+                                stats_pos_y: self.stats_pos.map(|(_, y)| y),
+                                shuffle: self.shuffle,
                                 mouse_single_click: self.mouse_bindings.single_click.clone(),
                                 mouse_double_click: self.mouse_bindings.double_click.clone(),
                                 mouse_scroll_up: self.mouse_bindings.scroll_up.clone(),
@@ -2510,6 +2562,16 @@ impl MpvNe {
                 self.ab_loop_b = None;
                 return Task::done(Message::ShowOsd("AB repeat cleared".into()));
             }
+            Message::AbLoopCycle => {
+                // One key for the whole workflow (how mpv's own ab-loop key
+                // behaves): first press sets A, second sets B and starts
+                // looping, third clears.
+                return Task::done(match (self.ab_loop_a, self.ab_loop_b) {
+                    (None, _) => Message::AbLoopSetA,
+                    (Some(_), None) => Message::AbLoopSetB,
+                    (Some(_), Some(_)) => Message::AbLoopClear,
+                });
+            }
 
             Message::ShowHelp => { self.show_help = !self.show_help; }
 
@@ -2894,29 +2956,6 @@ impl MpvNe {
             }
             Message::LoopPlaylistChanged(v) => self.player.loop_playlist = v,
 
-            Message::ShufflePlaylist => {
-                if self.playlist.len() > 1 {
-                    let current = self.playlist[self.playlist_idx].clone();
-                    // Fisher-Yates with a time-seeded LCG (no rand crate needed).
-                    let seed = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos() as u64;
-                    let mut rng = seed.wrapping_add(0xdeadbeef);
-                    for i in (1..self.playlist.len()).rev() {
-                        rng = rng.wrapping_mul(6364136223846793005)
-                            .wrapping_add(1442695040888963407);
-                        let j = (rng >> 33) as usize % (i + 1);
-                        self.playlist.swap(i, j);
-                    }
-                    // Keep current file at the front after shuffle.
-                    if let Some(pos) = self.playlist.iter().position(|p| p == &current) {
-                        self.playlist.swap(0, pos);
-                    }
-                    self.playlist_idx = 0;
-                    return Task::done(Message::ShowOsd("Playlist shuffled".into()));
-                }
-            }
 
             Message::FileContextMenu(path) => {
                 let (x, y) = self.cursor_pos.unwrap_or((100.0, 100.0));
@@ -3285,10 +3324,21 @@ impl MpvNe {
             Message::SubPosChanged(v)      => self.player.sub_pos = v,
 
             Message::TakeScreenshot => {
-                self.player.screenshot();
+                if self.screenshot_subs {
+                    self.player.screenshot();
+                } else {
+                    self.player.screenshot_no_subs();
+                }
                 let dir = if self.screenshot_dir.is_empty() { "default folder".into() }
                           else { self.screenshot_dir.clone() };
-                return Task::done(Message::ShowOsd(format!("Screenshot saved  {dir}")));
+                let suffix = if self.screenshot_subs { "" } else { " (no subtitles)" };
+                return Task::done(Message::ShowOsd(format!("Screenshot saved{suffix}  {dir}")));
+            }
+            Message::ToggleScreenshotSubs => {
+                self.screenshot_subs = !self.screenshot_subs;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.playback.screenshot_subs = self.screenshot_subs;
+                prefs.save();
             }
             Message::ChooseScreenshotDir => {
                 return Task::perform(
@@ -3316,6 +3366,20 @@ impl MpvNe {
 
             Message::Noop => {}
 
+            Message::StatsDragStart(x, y) => {
+                if let Some((cx, cy)) = self.cursor_pos {
+                    self.stats_drag_start = Some((cx, cy, x, y));
+                }
+            }
+            Message::StatsResetPos => {
+                self.stats_pos = None;
+                self.stats_drag_start = None;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.stats_pos_x = None;
+                prefs.interface.stats_pos_y = None;
+                prefs.save();
+                return Task::done(Message::ShowOsd("Stats position reset".into()));
+            }
             Message::RestartApp => {
                 // Save state and spawn a fresh copy of ourselves before
                 // exiting, passing the currently-open file so it reopens
@@ -4048,6 +4112,15 @@ impl MpvNe {
                         self.vr_yaw = new_yaw;
                         self.vr_pitch = new_pitch;
                     }
+                    if let Some((start_cx, start_cy, start_px, start_py)) = self.stats_drag_start {
+                        // Clamp so the panel can't be dragged fully off-screen
+                        // and become unreachable.
+                        let max_x = (self.window_w_logical - 60.0).max(0.0);
+                        let max_y = (self.window_h_logical - 40.0).max(0.0);
+                        let nx = (start_px + (x - start_cx)).clamp(0.0, max_x);
+                        let ny = (start_py + (y - start_cy)).clamp(0.0, max_y);
+                        self.stats_pos = Some((nx, ny));
+                    }
                 } else if Some(id) == self.panel_window_id {
                     self.panel_cursor_pos = Some((x, y));
                 } else if Some(id) == self.app_settings_window_id {
@@ -4067,6 +4140,16 @@ impl MpvNe {
                 if button == iced::mouse::Button::Left {
                     self.pan_drag_start = None;
                     self.vr_drag_start = None;
+                    // Persist the stats overlay's position once the drag
+                    // ends, rather than on every cursor move.
+                    if self.stats_drag_start.take().is_some() {
+                        if let Some((x, y)) = self.stats_pos {
+                            let mut prefs = crate::settings::Settings::load();
+                            prefs.interface.stats_pos_x = Some(x);
+                            prefs.interface.stats_pos_y = Some(y);
+                            prefs.save();
+                        }
+                    }
                 }
             }
             Message::WindowUnfocused(id) => {
@@ -4316,18 +4399,47 @@ impl MpvNe {
             }
 
             Message::NextFile => {
-                if self.playlist_idx + 1 < self.playlist.len() {
+                if self.shuffle && self.playlist.len() > 1 {
+                    let from = self.playlist_idx;
+                    self.shuffle_history.push(from);
+                    let next = pick_shuffled_index(self.playlist.len(), from);
+                    self.playlist_idx = next;
+                    let p = self.playlist[next].clone();
+                    self.open_next(p.to_string_lossy().into_owned());
+                } else if self.playlist_idx + 1 < self.playlist.len() {
                     self.playlist_idx += 1;
                     let p = self.playlist[self.playlist_idx].clone();
                     self.open_next(p.to_string_lossy().into_owned());
                 }
             }
             Message::PrevFile => {
-                if self.playlist_idx > 0 {
+                // In shuffle mode "previous" means the track actually played
+                // before this one, not the one above it in the list.
+                if self.shuffle {
+                    if let Some(prev) = self.shuffle_history.pop() {
+                        if prev < self.playlist.len() {
+                            self.playlist_idx = prev;
+                            let p = self.playlist[prev].clone();
+                            self.open_next(p.to_string_lossy().into_owned());
+                        }
+                    }
+                } else if self.playlist_idx > 0 {
                     self.playlist_idx -= 1;
                     let p = self.playlist[self.playlist_idx].clone();
                     self.open_next(p.to_string_lossy().into_owned());
                 }
+            }
+            Message::ToggleShuffle => {
+                self.shuffle = !self.shuffle;
+                self.shuffle_history.clear();
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.shuffle = self.shuffle;
+                prefs.save();
+                return Task::done(Message::ShowOsd(if self.shuffle {
+                    "Shuffle on".into()
+                } else {
+                    "Shuffle off".into()
+                }));
             }
         }
         Task::none()
@@ -5016,6 +5128,26 @@ fn ytdl_available() -> bool {
     check("yt-dlp") || check("youtube-dl") || ytdl_local_path().is_some_and(|p| p.exists())
 }
 
+/// Where screenshots actually get written. mpv's own default when
+/// `screenshot-directory` is unset is the process working directory, which
+/// for a GUI launch is wherever Explorer happened to start us - effectively
+/// unfindable, and it made the "Default folder" label in Settings useless.
+/// Resolve an explicit, predictable folder instead so the path shown in the
+/// UI is the real one.
+pub fn effective_screenshot_dir(configured: &str) -> String {
+    if !configured.trim().is_empty() {
+        return configured.to_string();
+    }
+    directories::UserDirs::new()
+        .and_then(|d| {
+            d.picture_dir()
+                .map(|p| p.join("MPV-NE").to_string_lossy().into_owned())
+        })
+        // No Pictures folder (unusual) - fall back to mpv's own behaviour
+        // rather than inventing a path.
+        .unwrap_or_default()
+}
+
 /// Where we keep an auto-downloaded yt-dlp binary (see `download_ytdlp`),
 /// separate from resume.json/settings.toml but in the same app data dir.
 fn ytdl_local_path() -> Option<std::path::PathBuf> {
@@ -5164,6 +5296,28 @@ const MEDIA_EXTS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "webm", "m4v", "flv", "wmv", "ts",
     "mp3", "flac", "ogg", "wav", "aac", "opus",
 ];
+
+/// Pick a random playlist index other than `current`. Uses a small inline
+/// PRNG (splitmix64 over a time seed) rather than pulling in the `rand`
+/// crate - shuffle order doesn't need cryptographic or statistical rigour,
+/// just "not the same one twice in a row and not obviously patterned".
+fn pick_shuffled_index(len: usize, current: usize) -> usize {
+    if len <= 1 {
+        return current;
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut x = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    // Draw from the len-1 slots that aren't `current`, then shift past it -
+    // guarantees a different track without a retry loop.
+    let pick = (x % (len as u64 - 1)) as usize;
+    if pick >= current { pick + 1 } else { pick }
+}
 
 fn build_folder_playlist(path: &std::path::Path) -> (Vec<std::path::PathBuf>, usize) {
     let Some(parent) = path.parent() else {

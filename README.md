@@ -110,17 +110,31 @@ mpv-lib/          - mpv.lib import library (not included, see above)
 
 ## Roadmap
 
+### Look and feel
+- Colour themes based on Nordic seasons (Polar Night / Midnight Sun logo variants are already in `assets/`)
 - Settings panel full customisability (choose what appears, reorder sections)
-- Colour themes based on Nordic seasons
-- Visual effects and animations
 - Customisable button layout
-- Mini player mode + audio spectrum visualizer (built, not yet merged)
-- GPU zero-copy rendering: GPU-side video rendering via mpv's OpenGL path is done (opt-in "GPU video rendering" setting); the remaining step is true zero-copy interop into wgpu to also eliminate the frame read-back
-- Linux and macOS support (untested)
+- Visual effects and animations
+
+### Playback features
+- Mini player mode + audio visualizers (spectrum / waveform)
+- Recording / stream capture - a raw passthrough version was built and pulled back out; worth redoing with real transcode options rather than a file-extension picker that doesn't re-encode
+- Audio output device selection (most players let you pick the output; we always use the system default)
+- Auto-load external subtitle files sitting next to the video
+- Media info panel - full container/stream details, beyond what the stats overlay shows
+- Power-user escape hatch: pass custom mpv options or filter chains
+
+### Performance
+- GPU zero-copy rendering: GPU-side video rendering via mpv's OpenGL path is done (the "GPU video rendering" setting); the remaining step is true zero-copy interop into wgpu to also eliminate the frame read-back
+- Optional internal render-resolution cap, so 4K fullscreen can trade a little sharpness for smoothness without the full zero-copy work
+- Apply the GPU rendering toggle without a restart - blocked for now: mpv expects one render context per process, and recreating it live leaves a paused video black (a "Restart now" button covers this in the meantime)
+
+### Platforms
+- Linux and macOS support (untested) - the tray, media keys, taskbar buttons, file associations and GL context are all Win32-specific and need per-platform equivalents
 
 ## Version
 
-0.4.8 - see [CHANGELOG](CHANGELOG.md)
+0.4.9 - see [CHANGELOG](CHANGELOG.md)
 
 ## Licence
 

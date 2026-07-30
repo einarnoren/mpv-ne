@@ -426,6 +426,7 @@ pub fn init_and_render_loop_gl(
         return RenderExit::Restart;
     }
     tracing::info!("gl_render: OpenGL render context ready");
+    crate::player::RENDERER_IS_GPU.store(true, Ordering::Relaxed);
 
     let cb_box = Box::new(std::sync::Arc::clone(&render_size));
     let cb_ptr = Box::into_raw(cb_box) as *mut std::ffi::c_void;

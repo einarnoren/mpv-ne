@@ -1,5 +1,6 @@
 pub mod app_settings;
 mod browser_panel;
+mod chapter_panel;
 mod controls;
 mod edge_grips;
 mod icons;
@@ -38,6 +39,11 @@ pub const AURORA_PURPLE: Color = Color::from_rgb(0.700, 0.550, 0.920);
 
 // Width of the docked settings panel in pixels.
 pub const SETTINGS_PANEL_W: f32 = 280.0;
+
+/// Fixed width of the stats overlay. Pinned rather than content-sized so
+/// its default (top-right) position can be computed exactly in window
+/// coords, which is what lets a drag start from wherever it's showing.
+pub const STATS_W: f32 = 250.0;
 
 /// Format a Unix timestamp as a human-readable relative time.
 pub fn fmt_age(unix_secs: u64) -> String {
@@ -238,6 +244,7 @@ fn menu_rows(app: &MenuSnapshot) -> Vec<MenuRow> {
     rows.push(Item("Playlist".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Playlist)))));
     rows.push(Item("Browse files".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Browser)))));
     rows.push(Item("Recent".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Recent)))));
+    rows.push(Item("Chapters".to_string(), Message::VideoMenuAction(Box::new(Message::TogglePanel(PanelKind::Chapters)))));
     let private_label = if app.private_mode { "Exit private mode" } else { "Private mode (no history)" };
     rows.push(Item(private_label.to_string(), Message::VideoMenuAction(Box::new(Message::TogglePrivateMode))));
     if has_media {
@@ -449,6 +456,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         ("Playlist", PanelKind::Playlist),
         ("Browser",  PanelKind::Browser),
         ("Recent",   PanelKind::Recent),
+        ("Chapters", PanelKind::Chapters),
         ("Playback", PanelKind::Settings),
     ];
 
@@ -459,10 +467,17 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         for (label, kind) in TABS {
             let is_active = active == *kind;
             let kind = *kind;
+            // Tabs split the panel width evenly, so each gets ~1/5 of it -
+            // tight padding and a slightly smaller label are what let five
+            // tabs fit without widening the panel (which would eat into the
+            // video area). Full names are still available via the tooltips.
             let tab = button(
-                text(*label).size(12).color(if is_active { BG_DEEPEST } else { TEXT_MUTED }),
+                text(*label)
+                    .size(11)
+                    .center()
+                    .color(if is_active { BG_DEEPEST } else { TEXT_MUTED }),
             )
-            .padding([6, 10])
+            .padding([6, 2])
             .width(Length::Fill)
             .style(move |_t, _status| iced::widget::button::Style {
                 background: Some(iced::Background::Color(if is_active {
@@ -483,6 +498,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
                 PanelKind::Playlist => "Playlist",
                 PanelKind::Browser  => "File browser",
                 PanelKind::Recent   => "Recently played",
+                PanelKind::Chapters => "Chapters",
                 PanelKind::Settings => "Playback settings",
             };
             let tipped_tab = tooltip(tab, text(tip_text).size(11), tooltip::Position::Bottom)
@@ -545,6 +561,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         PanelKind::Playlist => playlist_panel::view(app),
         PanelKind::Browser  => browser_panel::view(app),
         PanelKind::Recent   => recent_panel::view(app),
+        PanelKind::Chapters => chapter_panel::view(app),
         PanelKind::Settings => settings::view(app),
     };
 
@@ -575,6 +592,13 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
     let vcodec = if p.video_codec.is_empty() { "—".into() } else { p.video_codec.clone() };
     let acodec = if p.audio_codec.is_empty() { "—".into() } else { p.audio_codec.clone() };
     let hwdec = if p.hwdec.is_empty() || p.hwdec == "no" { "software".into() } else { p.hwdec.clone() };
+    // Which render backend is *actually* running, not just what the setting
+    // says - it silently falls back to CPU if OpenGL can't initialize.
+    let renderer = if crate::player::RENDERER_IS_GPU.load(std::sync::atomic::Ordering::Relaxed) {
+        "GPU (OpenGL)"
+    } else {
+        "CPU (software)"
+    };
 
     let body = column![
         text("Stats").size(13).color(AURORA_TEAL),
@@ -586,10 +610,12 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
         line("A/V sync", format!("{:+.3} s", s.avsync)),
         line("Buffer", format!("{:.1} s ahead", s.cache_duration)),
         line("Decode", hwdec),
+        line("Renderer", renderer.to_string()),
     ]
     .spacing(3);
 
     let panel = container(body)
+        .width(Length::Fixed(STATS_W))
         .padding([10, 14])
         .style(|_| container::Style {
             background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.72))),
@@ -611,14 +637,23 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
         0.0
     };
 
-    let layer = container(panel)
+    // Where the panel sits right now: either the user's dragged position or
+    // the default top-right anchor, resolved to absolute window coords so a
+    // drag can start from wherever it currently appears.
+    let (x, y) = app.stats_pos.unwrap_or_else(|| {
+        let default_x = (app.window_w_logical - panel_w - 16.0 - STATS_W).max(0.0);
+        (default_x, 54.0)
+    });
+
+    // Drag to move, right-click to snap back to the default corner.
+    let draggable = mouse_area(panel)
+        .on_press(Message::StatsDragStart(x, y))
+        .on_right_press(Message::StatsResetPos);
+
+    stack![base, pin(draggable).x(x).y(y)]
         .width(Length::Fill)
         .height(Length::Fill)
-        .align_x(Horizontal::Right)
-        .align_y(Vertical::Top)
-        .padding(Padding { top: 54.0, right: 16.0 + panel_w, left: 0.0, bottom: 0.0 });
-
-    stack![base, layer].width(Length::Fill).height(Length::Fill).into()
+        .into()
 }
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {

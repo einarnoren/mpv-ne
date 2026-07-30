@@ -11,6 +11,16 @@
 .idea/
 *.swp
 
+# Loose images in the repo root - screenshots and the like. Anchored with a
+# leading slash so tracked artwork under assets/ is unaffected. mpv wrote
+# screenshots here before the save folder got an explicit default, and
+# without this a stray one gets swept into a commit by `git add -A`.
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+/*.bmp
+
 # OS
 .DS_Store
 Thumbs.db
