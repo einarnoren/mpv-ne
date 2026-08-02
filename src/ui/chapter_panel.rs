@@ -8,7 +8,7 @@ use iced::{
     widget::{button, column, container, row, scrollable, text, Space},
 };
 
-use super::{AURORA_TEAL, BG_DEEPEST, BG_HOVER, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED};
+use super::{accent_teal, bg_deepest, bg_hover, bg_surface, text_bright, text_muted};
 use crate::app::{Message, MpvNe};
 
 fn fmt_time(t: f64) -> String {
@@ -37,7 +37,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         container(
             text("No chapters in this file")
                 .size(12)
-                .color(TEXT_MUTED),
+                .color(text_muted()),
         )
         .padding([16, 14])
         .width(Length::Fill)
@@ -52,7 +52,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let rows = chapters.iter().enumerate().map(|(i, chap)| {
             let is_current = current == Some(i);
-            let name_color = if is_current { AURORA_TEAL } else { TEXT_BRIGHT };
+            let name_color = if is_current { accent_teal() } else { text_bright() };
 
             // Containers often omit chapter titles - fall back to a number
             // rather than showing an empty row.
@@ -68,7 +68,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 row![
                     text(fmt_time(chap.time))
                         .size(11)
-                        .color(TEXT_MUTED)
+                        .color(text_muted())
                         .width(Length::Fixed(56.0)),
                     text(title).size(12).color(name_color),
                     Space::new().width(Length::Fill),
@@ -81,8 +81,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if is_current { BG_SURFACE } else { BG_DEEPEST },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if is_current { bg_surface() } else { bg_deepest() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -105,7 +105,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // completely out of place.
     let nav_btn = |icon: iced::widget::Svg<'static>, label: &'static str, msg: Message| {
         button(
-            row![icon, text(label).size(11).color(TEXT_BRIGHT)]
+            row![icon, text(label).size(11).color(text_bright())]
                 .spacing(5)
                 .align_y(Alignment::Center),
         )
@@ -113,8 +113,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .style(|_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_SURFACE,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_surface(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
@@ -140,7 +140,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 Space::new().width(Length::Fill),
                 text(format!("{} chapters", chapters.len()))
                     .size(10)
-                    .color(TEXT_MUTED),
+                    .color(text_muted()),
             ]
             .spacing(6)
             .align_y(Alignment::Center),

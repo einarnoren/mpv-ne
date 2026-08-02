@@ -433,6 +433,11 @@ const TOP_BAR_H: i32 = 44;
 /// Width of the docked side panel in logical pixels. Must match SETTINGS_PANEL_W in ui/mod.rs.
 const PANEL_W: f32 = 280.0;
 
+// `active_panel` says a panel is *open*, not that it is taking space in the
+// main window - once popped out it lives in its own window. Everything that
+// subtracts the panel's width has to ask about the docked case specifically,
+// or it removes 280px that was never there.
+
 /// Whether to disable the OS title bar and draw our own - gives us pin,
 /// minimize, maximize, close all on the Nord top bar. When off, falls back
 /// to the OS title bar (still shown, just without our min/max/close buttons
@@ -549,8 +554,8 @@ pub struct MpvNe {
     /// stale reason can't be attributed to a later attempt.
     last_load_error: Option<String>,
     /// Pre-decoded image handles - created once to avoid re-uploading every frame.
-    pub img_icon: iced::widget::image::Handle,
-    pub img_logo: iced::widget::image::Handle,
+    pub img_icon: iced::widget::svg::Handle,
+    pub img_logo: iced::widget::svg::Handle,
     pub thumb_cache: crate::thumbnail::SharedCache,
     /// True while we are transitioning from one file to the next (open() was
     /// called but FileLoaded has not fired yet). During this window EndFile
@@ -804,6 +809,29 @@ pub struct MpvNe {
     /// tracks the docked panel's width (see `ui::stack_stats`). Persisted.
     /// Play the playlist in random order. Persisted. See `pick_shuffled_index`.
     pub shuffle: bool,
+    /// Active colour theme. The palette itself lives in a global (see
+    /// ui::theme) since the colour accessors are called all over the view
+    /// code; this field mirrors it so the picker can show what's selected
+    /// and so it gets persisted with everything else.
+    pub theme: crate::ui::theme::Theme,
+    /// Editable custom-theme colours as hex strings, kept as text so a
+    /// half-typed value survives while the field has focus. The parsed
+    /// colour is pushed into `ui::theme` as soon as it's valid.
+    pub custom_colors: Vec<String>,
+    /// Which custom-colour slot has its swatch grid expanded, if any. Purely
+    /// transient UI state, so it isn't persisted.
+    pub custom_picker: Option<usize>,
+    /// Hue/saturation/lightness of the slot being edited. Held here rather
+    /// than derived from the colour each frame because hue is undefined for
+    /// a grey - round-tripping would snap the slider to red the moment
+    /// saturation hit zero.
+    pub custom_hsl: (f32, f32, f32),
+    /// Theme the custom colours were seeded from; the target of a reset.
+    pub custom_base: crate::ui::theme::Theme,
+    /// The import field's contents while it's being edited. `None` means show
+    /// the palette's own exported form; it goes back to `None` as soon as an
+    /// edit lands, so the field can't drift out of step with the colours.
+    pub custom_import: Option<String>,
     /// Indices played before the current one while shuffling, so Previous
     /// walks back through actual play order rather than list order.
     shuffle_history: Vec<usize>,
@@ -899,12 +927,8 @@ impl Default for MpvNe {
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok()),
             last_load_error: None,
-            img_logo: iced::widget::image::Handle::from_bytes(
-                include_bytes!("../assets/MPV_NE_logo_hires.png").to_vec(),
-            ),
-            img_icon: iced::widget::image::Handle::from_bytes(
-                include_bytes!("../assets/MPV_NE_icon_hires.png").to_vec(),
-            ),
+            img_logo: theme_logo(crate::ui::theme::Theme::from_id(&prefs.interface.theme)),
+            img_icon: theme_icon(crate::ui::theme::Theme::from_id(&prefs.interface.theme)),
             transitioning: false,
             thumb_cache: crate::thumbnail::new_cache(),
             after_playback: AfterPlayback::default(),
@@ -995,6 +1019,12 @@ impl Default for MpvNe {
             probed_duration: 0.0,
             show_stats: false,
             shuffle: prefs.interface.shuffle,
+            theme: crate::ui::theme::Theme::from_id(&prefs.interface.theme),
+            custom_colors: prefs.interface.custom_colors.clone(),
+            custom_picker: None,
+            custom_hsl: (0.0, 0.0, 0.0),
+            custom_base: crate::ui::theme::Theme::from_id(&prefs.interface.custom_base),
+            custom_import: None,
             shuffle_history: Vec::new(),
             stats_pos: prefs.interface.stats_pos_x
                 .zip(prefs.interface.stats_pos_y),
@@ -1015,6 +1045,36 @@ impl Default for MpvNe {
         app.player.set_audio_normalize(app.audio_normalize);
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
         app.player.set_stream_quality(app.stream_quality_height);
+        // Start the custom slots from the default palette so any slot without
+        // a saved value falls back to something readable. Without this, a
+        // config that names the custom theme but has no colours yet renders
+        // the whole UI as black-on-black.
+        crate::ui::theme::set_custom_palette(crate::ui::theme::Theme::Aurora.palette());
+        for (i, hex) in app.custom_colors.iter().enumerate() {
+            if let Some(c) = crate::ui::theme::parse_hex(hex) {
+                crate::ui::theme::set_custom_slot(i, c);
+            }
+        }
+        // Fill in the editor's text fields for any slot the config didn't
+        // cover, so they show the colour in use rather than sitting blank.
+        // Only while the custom theme is actually selected - leaving the list
+        // empty otherwise is what lets switching to it seed from whichever
+        // theme was on screen.
+        if app.theme == crate::ui::theme::Theme::Custom
+            && app.custom_colors.len() < crate::ui::theme::CUSTOM_SLOTS.len()
+        {
+            app.custom_colors = crate::ui::theme::CUSTOM_SLOTS
+                .iter()
+                .map(|(_, i)| crate::ui::theme::to_hex(crate::ui::theme::custom_slot(*i)))
+                .collect();
+        }
+        crate::ui::theme::set_theme(app.theme);
+        // The artwork bakes the palette in and was built during struct
+        // construction, before the saved theme was activated above - so it
+        // holds the default theme's colours until rebuilt here.
+        app.img_logo = theme_logo(app.theme);
+        app.img_icon = theme_icon(app.theme);
+        apply_window_chrome_now();
         // Point mpv at a real screenshot folder up front (creating it if
         // needed - mpv won't) rather than leaving it at its working-directory
         // default. See `effective_screenshot_dir`.
@@ -1206,6 +1266,22 @@ pub enum Message {
     ToggleScreenshotSubs,
     /// Play the playlist in random order.
     ToggleShuffle,
+    SetTheme(crate::ui::theme::Theme),
+    /// Edit one custom-theme colour: slot index, new hex text.
+    SetCustomColor(usize, String),
+    /// Open or close the swatch grid for a custom-colour slot.
+    ToggleColorPicker(usize),
+    /// Dismiss the swatch grid - sent by a click outside it.
+    CloseColorPicker,
+    /// Drag one HSL axis of the slot being edited: 0 = hue, 1 = saturation,
+    /// 2 = lightness.
+    SetCustomHsl(u8, f32),
+    /// Restore one custom slot to the theme it was seeded from.
+    ResetCustomColor(usize),
+    /// Restore every custom slot to the theme it was seeded from.
+    ResetAllCustomColors,
+    /// Text typed or pasted into the palette import field.
+    ImportCustomPalette(String),
     /// Toggle the stats overlay on/off.
     ToggleStats,
     /// Cycle the video framing: Fit → Fill → Stretch.
@@ -1666,7 +1742,7 @@ impl MpvNe {
                 self.install_modal_hook_once();
 
                 let h_offset = if self.chrome_visible() { CONTROLS_H + TOP_BAR_H } else { 0 };
-                let panel_px = if self.active_panel.is_some() { PANEL_W as u32 } else { 0 };
+                let panel_px = self.docked_panel_w() as u32;
                 let w = (size.width as u32).saturating_sub(panel_px);
                 let h = (size.height as i32 - h_offset).max(0) as u32;
                 self.pending_w = w;
@@ -1735,11 +1811,12 @@ impl MpvNe {
                     };
                     if !maximized {
                         // Save video-column width only (strip panel if open).
-                        let save_w_logical = if self.active_panel.is_some() {
-                            (self.window_w_logical - PANEL_W).max(480.0)
-                        } else {
-                            self.window_w_logical.max(0.0)
-                        };
+                        // Strip the docked panel so the saved width is the
+                        // player's own. Popped out it takes no width here, and
+                        // subtracting it anyway shrank the window by 280px on
+                        // every close.
+                        let save_w_logical =
+                            (self.window_w_logical - self.docked_panel_w()).max(0.0);
                         // settings.toml stores PHYSICAL pixels (see
                         // desired_window_physical's doc comment) - convert
                         // from iced's logical pixels using the live-queried
@@ -1807,6 +1884,9 @@ impl MpvNe {
                                 stats_pos_x: self.stats_pos.map(|(x, _)| x),
                                 stats_pos_y: self.stats_pos.map(|(_, y)| y),
                                 shuffle: self.shuffle,
+                                theme: self.theme.id().to_string(),
+                                custom_colors: self.custom_colors.clone(),
+                                custom_base: self.custom_base.id().to_string(),
                                 mouse_single_click: self.mouse_bindings.single_click.clone(),
                                 mouse_double_click: self.mouse_bindings.double_click.clone(),
                                 mouse_scroll_up: self.mouse_bindings.scroll_up.clone(),
@@ -3570,7 +3650,7 @@ impl MpvNe {
                     } else {
                         0.0
                     };
-                    let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                    let panel_w = self.docked_panel_w();
                     return iced::window::scale_factor(id).then(move |dpi| {
                         let w = phys_w / dpi as f32 + panel_w;
                         let h = phys_h / dpi as f32 + chrome_h;
@@ -3597,7 +3677,7 @@ impl MpvNe {
                 };
                 if let Some(id) = self.window_id {
                     self.fit_menu_open = false;
-                    let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                    let panel_w = self.docked_panel_w();
                     return iced::window::scale_factor(id).then(move |dpi| {
                         let h_log = target_h as f32 / dpi as f32;
                         let w_log = h_log * aspect + panel_w;
@@ -3688,7 +3768,7 @@ impl MpvNe {
                 self.pip_prev_y = self.window_y_logical;
                 self.pip_prev_chrome_hidden = self.chrome_force_hidden;
                 self.pip_prev_pinned = self.pinned;
-                let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                let panel_w = self.docked_panel_w();
                 self.active_panel = None;
 
                 let mut tasks: Vec<Task<Message>> = Vec::new();
@@ -4058,7 +4138,7 @@ impl MpvNe {
                         // Save current window size (video-column width + height)
                         // before the OS/iced overwrites window_w/h_logical with
                         // the screen resolution.
-                        let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                        let panel_w = self.docked_panel_w();
                         self.pre_fullscreen_w = Some(self.window_w_logical - panel_w);
                         self.pre_fullscreen_h = Some(self.window_h_logical);
                         // Panel stays open - it shares space with the video
@@ -4071,7 +4151,7 @@ impl MpvNe {
                         // (user may have opened/closed it while in fullscreen).
                         let saved_video_w = self.pre_fullscreen_w.take().unwrap_or(800.0);
                         let saved_h      = self.pre_fullscreen_h.take().unwrap_or(600.0);
-                        let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                        let panel_w = self.docked_panel_w();
                         let restore_w = (saved_video_w + panel_w).max(480.0);
                         let level = if self.pinned {
                             iced::window::Level::AlwaysOnTop
@@ -4145,7 +4225,7 @@ impl MpvNe {
                 if Some(id) == self.window_id {
                     self.cursor_pos = Some((x, y));
                     if let Some((start_x, start_y, start_pan_x, start_pan_y)) = self.pan_drag_start {
-                        let w = (self.window_w_logical - if self.active_panel.is_some() { PANEL_W } else { 0.0 }).max(1.0);
+                        let w = (self.window_w_logical - self.docked_panel_w()).max(1.0);
                         let h = (self.window_h_logical - TOP_BAR_H as f32 - CONTROLS_H as f32).max(1.0);
                         let new_x = (start_pan_x + ((x - start_x) / w) as f64).clamp(-1.5, 1.5);
                         let new_y = (start_pan_y + ((y - start_y) / h) as f64).clamp(-1.5, 1.5);
@@ -4154,7 +4234,7 @@ impl MpvNe {
                         self.player.video_pan_y = new_y;
                     }
                     if let Some((start_x, start_y, start_yaw, start_pitch)) = self.vr_drag_start {
-                        let w = (self.window_w_logical - if self.active_panel.is_some() { PANEL_W } else { 0.0 }).max(1.0);
+                        let w = (self.window_w_logical - self.docked_panel_w()).max(1.0);
                         let fov_rad = self.vr_fov_deg.to_radians();
                         // Dragging across the full video width rotates by
                         // roughly one FOV's worth - an intuitive 1:1 feel
@@ -4386,7 +4466,7 @@ impl MpvNe {
                             let over_video = self.cursor_pos.map(|(x, y)| {
                                 let controls_top = self.window_h_logical - CONTROLS_H as f32;
                                 let panel_left = self.window_w_logical
-                                    - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                                    - self.docked_panel_w();
                                 y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
                             }).unwrap_or(false);
                             if over_video {
@@ -4404,7 +4484,7 @@ impl MpvNe {
                             let over_video = self.cursor_pos.map(|(x, y)| {
                                 let controls_top = self.window_h_logical - CONTROLS_H as f32;
                                 let panel_left = self.window_w_logical
-                                    - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                                    - self.docked_panel_w();
                                 y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
                             }).unwrap_or(false);
                             if over_video {
@@ -4418,7 +4498,7 @@ impl MpvNe {
                             if let Some((_, y)) = self.cursor_pos {
                                 let controls_top = self.window_h_logical - CONTROLS_H as f32;
                                 let panel_left = self.window_w_logical
-                                    - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                                    - self.docked_panel_w();
                                 y < controls_top && self.cursor_pos.map(|(x, _)| x < panel_left).unwrap_or(true)
                             } else {
                                 false
@@ -4441,7 +4521,7 @@ impl MpvNe {
                     let over_video = self.cursor_pos.map(|(x, y)| {
                         let controls_top = self.window_h_logical - CONTROLS_H as f32;
                         let panel_left = self.window_w_logical
-                            - if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+                            - self.docked_panel_w();
                         y > TOP_BAR_H as f32 && y < controls_top && x < panel_left
                     }).unwrap_or(false);
                     if over_video {
@@ -4480,6 +4560,124 @@ impl MpvNe {
                     let p = self.playlist[self.playlist_idx].clone();
                     self.open_next(p.to_string_lossy().into_owned());
                 }
+            }
+            Message::SetTheme(t) => {
+                // Selecting Custom for the first time seeds it from the
+                // theme that was showing, so there's something coherent to
+                // edit rather than nine black fields.
+                if t == crate::ui::theme::Theme::Custom && self.custom_colors.is_empty() {
+                    let from = crate::ui::theme::active_theme();
+                    crate::ui::theme::set_custom_palette(from.palette());
+                    self.custom_base = from;
+                    let mut prefs = crate::settings::Settings::load();
+                    prefs.interface.custom_base = from.id().to_string();
+                    prefs.save();
+                    self.custom_colors = crate::ui::theme::CUSTOM_SLOTS
+                        .iter()
+                        .map(|(_, i)| crate::ui::theme::to_hex(crate::ui::theme::custom_slot(*i)))
+                        .collect();
+                }
+                self.theme = t;
+                // The view code reads colours from a global rather than from
+                // app state, so update that too - otherwise the setting
+                // changes but nothing repaints differently.
+                //
+                // This has to happen *before* the artwork is rebuilt: the
+                // logo bakes the palette's accents into the SVG at build
+                // time and reads them from this same global, so building it
+                // first would bake in the outgoing theme's colours and leave
+                // the logo one click behind.
+                crate::ui::theme::set_theme(t);
+                self.img_logo = theme_logo(t);
+                self.img_icon = theme_icon(t);
+                apply_window_chrome_now();
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.theme = t.id().to_string();
+                prefs.save();
+                return Task::done(Message::ShowOsd(format!("Theme: {}", t.label())));
+            }
+            Message::SetCustomColor(idx, hex) => {
+                if idx < self.custom_colors.len() {
+                    self.custom_colors[idx] = hex.clone();
+                }
+                // Only push through once it parses, so the UI doesn't flash
+                // black while a hex value is half-typed.
+                if let Some(c) = crate::ui::theme::parse_hex(&hex) {
+                    crate::ui::theme::set_custom_slot(idx, c);
+                    // The export field shows the palette, so it's stale now.
+                    self.custom_import = None;
+                    // A swatch click or typed hex has to move the sliders
+                    // too, or the next drag would jump back to the old value.
+                    if self.custom_picker == Some(idx) {
+                        let (h, s, l) = crate::ui::theme::to_hsl(c);
+                        // Preserve hue across greys, where it's undefined.
+                        self.custom_hsl = if s <= f32::EPSILON {
+                            (self.custom_hsl.0, s, l)
+                        } else {
+                            (h, s, l)
+                        };
+                    }
+                    self.refresh_custom_theme();
+                }
+            }
+            Message::ToggleColorPicker(idx) => {
+                // Seed the sliders from whatever the slot currently holds.
+                if self.custom_picker != Some(idx) {
+                    self.custom_hsl =
+                        crate::ui::theme::to_hsl(crate::ui::theme::custom_slot(idx));
+                }
+                // Clicking the open slot's swatch closes it again.
+                self.custom_picker = if self.custom_picker == Some(idx) {
+                    None
+                } else {
+                    Some(idx)
+                };
+            }
+            Message::CloseColorPicker => {
+                self.custom_picker = None;
+            }
+            Message::SetCustomHsl(axis, v) => {
+                let Some(idx) = self.custom_picker else { return Task::none() };
+                match axis {
+                    0 => self.custom_hsl.0 = v,
+                    1 => self.custom_hsl.1 = v,
+                    _ => self.custom_hsl.2 = v,
+                }
+                let (h, s, l) = self.custom_hsl;
+                let hex = crate::ui::theme::to_hex(crate::ui::theme::from_hsl(h, s, l));
+                return Task::done(Message::SetCustomColor(idx, hex));
+            }
+            Message::ImportCustomPalette(s) => {
+                match crate::ui::theme::parse_custom_palette(&s) {
+                    Some(colors) => {
+                        for (i, c) in colors.iter().enumerate() {
+                            crate::ui::theme::set_custom_slot(i, *c);
+                        }
+                        self.custom_colors = colors
+                            .iter()
+                            .map(|c| crate::ui::theme::to_hex(*c))
+                            .collect();
+                        self.custom_import = None;
+                        self.refresh_custom_theme();
+                    }
+                    // Keep what was typed so a partial paste stays visible
+                    // and editable rather than snapping back.
+                    None => self.custom_import = Some(s),
+                }
+            }
+            Message::ResetAllCustomColors => {
+                let base = self.custom_base.palette();
+                crate::ui::theme::set_custom_palette(base);
+                self.custom_colors = crate::ui::theme::CUSTOM_SLOTS
+                    .iter()
+                    .map(|(_, i)| crate::ui::theme::to_hex(crate::ui::theme::custom_slot(*i)))
+                    .collect();
+                self.custom_import = None;
+                self.refresh_custom_theme();
+            }
+            Message::ResetCustomColor(idx) => {
+                let c = crate::ui::theme::palette_slot(self.custom_base.palette(), idx);
+                return Task::done(Message::SetCustomColor(idx, crate::ui::theme::to_hex(c)));
             }
             Message::ToggleShuffle => {
                 self.shuffle = !self.shuffle;
@@ -4950,7 +5148,7 @@ impl MpvNe {
             0.0
         };
         // If a panel is open, keep it alongside the video at its current width.
-        let panel_w = if self.active_panel.is_some() { PANEL_W } else { 0.0 };
+        let panel_w = self.docked_panel_w();
         Some(iced::Size::new(vis_w + panel_w, vis_h + chrome_h))
     }
 
@@ -5260,6 +5458,82 @@ fn ytdl_available() -> bool {
         cmd.status().is_ok_and(|s| s.success())
     };
     check("yt-dlp") || check("youtube-dl") || ytdl_local_path().is_some_and(|p| p.exists())
+}
+
+impl MpvNe {
+    /// Re-derive everything downstream of the custom colours: the artwork
+    /// bakes them in, and the config needs to keep them.
+    /// Width the panel occupies inside the main window - zero while it is
+    /// popped out, even though `active_panel` is still set.
+    pub fn docked_panel_w(&self) -> f32 {
+        if self.active_panel.is_some() && self.panel_window_id.is_none() {
+            PANEL_W
+        } else {
+            0.0
+        }
+    }
+
+    fn refresh_custom_theme(&mut self) {
+        if self.theme == crate::ui::theme::Theme::Custom {
+            self.img_logo = theme_logo(self.theme);
+            self.img_icon = theme_icon(self.theme);
+        }
+        apply_window_chrome_now();
+        let mut prefs = crate::settings::Settings::load();
+        prefs.interface.custom_colors = self.custom_colors.clone();
+        prefs.save();
+    }
+}
+
+/// Push the active theme at the parts of the window Windows draws itself.
+///
+/// Free-standing rather than a method because the WndProc hook calls it too:
+/// it runs on its own thread and only finds the window some milliseconds
+/// after startup, by which point the theme has long since been applied.
+pub fn apply_window_chrome_now() {
+    #[cfg(target_os = "windows")]
+    {
+        use crate::ui::theme;
+        // "Dark" means the theme's own background - that's what the system
+        // frame sits against - not the OS's dark-mode setting.
+        let bg = theme::bg_deepest();
+        let luma = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b;
+        let c = theme::border();
+        let q = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+        crate::win32_modal::apply_window_chrome(
+            luma < 0.5,
+            (q(c.r) << 16) | (q(c.g) << 8) | q(c.b),
+        );
+    }
+}
+
+/// Recolour a logo SVG to the active theme.
+///
+/// The source artwork's three gradient stops are swapped for the theme's own
+/// (see `theme::logo_stops`). "MPV" is plain white in the source - invisible
+/// on the light themes - so that takes the text colour. One vector then
+/// covers all six themes, custom included, instead of a PNG per theme.
+fn themed_logo_svg(src: &str) -> iced::widget::svg::Handle {
+    use crate::ui::theme::{logo_stops, text_bright, to_hex};
+    let [a, b, c] = logo_stops();
+    let out = src
+        .replace("#c9adf1", &to_hex(a))
+        .replace("#84d7e6", &to_hex(b))
+        // Two greens in the source - the second is a lighter tint used on the
+        // wordmark - both take the final stop.
+        .replace("#61dba8", &to_hex(c))
+        .replace("#8fe5c1", &to_hex(c))
+        .replace("fill:#fff", &format!("fill:{}", to_hex(text_bright())));
+    iced::widget::svg::Handle::from_memory(out.into_bytes())
+}
+
+fn theme_logo(_t: crate::ui::theme::Theme) -> iced::widget::svg::Handle {
+    themed_logo_svg(include_str!("../assets/MPV_NE_logo.svg"))
+}
+
+/// The play mark alone, for title bars.
+fn theme_icon(_t: crate::ui::theme::Theme) -> iced::widget::svg::Handle {
+    themed_logo_svg(include_str!("../assets/MPV_NE_logo_icon.svg"))
 }
 
 /// Where screenshots actually get written. mpv's own default when
@@ -5600,6 +5874,16 @@ fn on_window_event(
                 Key::Named(Named::MediaStop)           => return Some(Message::Stop),
                 Key::Named(Named::MediaTrackNext)      => return Some(Message::NextFile),
                 Key::Named(Named::MediaTrackPrevious)  => return Some(Message::PrevFile),
+                _ => {}
+            }
+            // A focused text field - hex colour, subtitle search, jump-to-time
+            // - captures the keys it uses. Letting shortcuts run on top of
+            // that means typing "b" into a colour also toggles something.
+            // Media keys are handled above so they keep working regardless.
+            if matches!(status, iced::event::Status::Captured) {
+                return None;
+            }
+            match &key {
                 // Ctrl+G = jump to time
                 Key::Character(c) if c.as_str() == "g" && modifiers.control() => {
                     return Some(Message::JumpToTime);

@@ -5,7 +5,7 @@ use iced::{
     widget::{button, column, container, row, scrollable, text, Space},
 };
 
-use super::{AURORA_TEAL, BG_DEEPEST, BG_HOVER, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED};
+use super::{accent_teal, bg_deepest, bg_hover, bg_surface, text_bright, text_muted};
 use crate::app::{Message, MpvNe};
 
 fn trunc(s: &str, max_chars: usize) -> String {
@@ -20,7 +20,7 @@ fn trunc(s: &str, max_chars: usize) -> String {
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let entries: Element<'_, Message> = if app.recent_files.paths.is_empty() {
-        container(text("No recent files").size(12).color(TEXT_MUTED))
+        container(text("No recent files").size(12).color(text_muted()))
             .padding([16, 14])
             .width(Length::Fill)
             .into()
@@ -50,7 +50,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             };
 
             let is_current = is_current_path.as_deref() == Some(&path.to_string_lossy().into_owned());
-            let name_color = if is_current { AURORA_TEAL } else { TEXT_BRIGHT };
+            let name_color = if is_current { accent_teal() } else { text_bright() };
 
             let meta = super::fmt_meta(path, &app.size_cache, &app.resume_db);
             let age  = app.resume_db
@@ -61,12 +61,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             let item = button(
                 column![
                     text(display_name).size(12).color(name_color),
-                    text(dir_display).size(10).color(TEXT_MUTED),
+                    text(dir_display).size(10).color(text_muted()),
                     text(format!("{}{}", meta,
                         if !age.is_empty() && !meta.is_empty() { format!("  |  {age}") }
                         else if !age.is_empty() { age }
                         else { String::new() }
-                    )).size(10).color(TEXT_MUTED),
+                    )).size(10).color(text_muted()),
                 ]
                 .spacing(2),
             )
@@ -75,8 +75,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_DEEPEST,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_deepest(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -104,17 +104,17 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .into()
     };
 
-    let clear_btn = button(text("Clear").size(11).color(super::AURORA_PURPLE))
+    let clear_btn = button(text("Clear").size(11).color(crate::ui::theme::legible_on_chrome(super::accent_purple())))
         .padding([3, 8])
         .style(|_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => super::BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => super::bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color: super::AURORA_PURPLE,
+                text_color: super::accent_purple(),
                 border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                 ..Default::default()
             }
@@ -125,7 +125,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         row![
             text(format!("{} recent file{}", app.recent_files.paths.len(),
                 if app.recent_files.paths.len() == 1 { "" } else { "s" }))
-                .size(11).color(TEXT_MUTED),
+                .size(11).color(text_muted()),
             Space::new().width(Length::Fill),
             clear_btn,
         ]
@@ -134,7 +134,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .padding([6, 12])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     });
 
@@ -146,7 +146,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_DEEPEST)),
+        background: Some(iced::Background::Color(bg_deepest())),
         ..Default::default()
     })
     .into()

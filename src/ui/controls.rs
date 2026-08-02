@@ -4,7 +4,7 @@ use iced::{
 };
 
 use super::{
-    AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED, icons,
+    accent_green, accent_purple, accent_teal, bg_surface, text_bright, text_muted, icons,
 };
 use crate::app::{Message, MpvNe};
 
@@ -14,13 +14,16 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Transport row buttons. Each is wrapped with `icons::tipped` so hover
     // shows a short label. Toggles use `square_toggle` so their on-state is
     // visually obvious (nord8 background when active).
-    let play_glyph = if app.player.paused { icons::play() } else { icons::pause() };
+    // With nothing loaded mpv reports "not paused", which would otherwise put
+    // a pause glyph on a player that has nothing to pause.
+    let showing_play = app.player.paused || !has_media;
+    let play_glyph = if showing_play { icons::play() } else { icons::pause() };
     let play_pause = {
         let mut b = icons::square_btn(play_glyph);
         if has_media {
             b = b.on_press(Message::TogglePause);
         }
-        icons::tipped(b, if app.player.paused { "Play (Space)" } else { "Pause (Space)" })
+        icons::tipped(b, if showing_play { "Play (Space)" } else { "Pause (Space)" })
     };
 
     let stop_btn = {
@@ -70,12 +73,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Use the video-column width for breakpoints, not the full window width,
     // so responsive hiding/showing still fires at sensible sizes when the
     // docked side panel is open.
-    let panel_w = if app.active_panel.is_some() { super::SETTINGS_PANEL_W } else { 0.0 };
+    let panel_w = app.docked_panel_w();
     let w = app.window_w_logical - panel_w;
 
     // Volume: shrink the slider and drop the "Vol X%" label at narrow widths.
     // Colour the label amber when boosted above 100% so the user knows.
-    let vol_color = if app.player.volume > 100.0 { super::AURORA_GREEN } else { TEXT_MUTED };
+    let vol_color = if app.player.volume > 100.0 { super::accent_green() } else { text_muted() };
     let vol_text: Element<'_, Message> = if w >= 750.0 {
         text(format!("Vol {:.0}%", app.player.volume))
             .color(vol_color)
@@ -160,7 +163,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         // AB point markers: A = green, B = teal, 3 px wide.
         const AB_W: f32 = 3.0;
-        for (time, color) in [(ab_a, AURORA_GREEN), (ab_b, AURORA_TEAL)] {
+        for (time, color) in [(ab_a, accent_green()), (ab_b, accent_teal())] {
             let Some(t) = time else { continue };
             if t < 0.0 || t > duration { continue; }
             let x = (t as f32 / duration as f32) * size.width - AB_W / 2.0;
@@ -190,8 +193,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(|_t, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => AURORA_GREEN,
-                    _ => AURORA_PURPLE,
+                    Status::Hovered | Status::Pressed => accent_green(),
+                    _ => accent_purple(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -223,8 +226,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(|_t, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => AURORA_TEAL,
-                    _ => AURORA_GREEN,
+                    Status::Hovered | Status::Pressed => accent_teal(),
+                    _ => accent_green(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -253,7 +256,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         format_time(app.player.position),
         format_time(app.player.duration),
     ))
-    .color(TEXT_BRIGHT)
+    .color(text_bright())
     .size(13);
 
     let live_badge: Element<'_, Message> = if app.stream_is_live {
@@ -273,7 +276,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Codec/audio info line: first thing to go as the window narrows.
     let info_text = build_info_line(app);
     let info: Element<'_, Message> = if w >= 1000.0 && !info_text.is_empty() {
-        text(info_text).color(TEXT_MUTED).size(12).into()
+        text(info_text).color(text_muted()).size(12).into()
     } else {
         Space::new().into()
     };
@@ -295,12 +298,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         icons::captions_off()
     };
     let subs_btn = icons::tipped(
-        icons::square_toggle(subs_icon, app.subs_menu_open, AURORA_GREEN)
+        icons::square_toggle(subs_icon, app.subs_menu_open, accent_green())
             .on_press(Message::ToggleSubsMenu),
         "Subtitle track (J to cycle)",
     );
     let subs: Element<'_, Message> = if w >= 950.0 {
-        row![subs_btn, text(current_label).color(TEXT_MUTED).size(12)]
+        row![subs_btn, text(current_label).color(text_muted()).size(12)]
             .spacing(6)
             .align_y(Alignment::Center)
             .into()
@@ -318,12 +321,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .unwrap_or_else(|| "Off".to_string());
 
     let audio_btn = icons::tipped(
-        icons::square_toggle(icons::audio_tracks(), app.audio_menu_open, AURORA_PURPLE)
+        icons::square_toggle(icons::audio_tracks(), app.audio_menu_open, accent_purple())
             .on_press(Message::ToggleAudioMenu),
         "Audio track (# to cycle)",
     );
     let audio: Element<'_, Message> = if w >= 950.0 {
-        row![audio_btn, text(audio_label).color(TEXT_MUTED).size(12)]
+        row![audio_btn, text(audio_label).color(text_muted()).size(12)]
             .spacing(6)
             .align_y(Alignment::Center)
             .into()
@@ -337,14 +340,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         icons::volume()
     };
     let mute = icons::tipped(
-        icons::square_toggle(mute_glyph, app.player.muted, AURORA_TEAL)
+        icons::square_toggle(mute_glyph, app.player.muted, accent_teal())
             .on_press(Message::ToggleMute),
         "Mute (M)",
     );
 
     let full_glyph = if app.fullscreen { icons::minimize() } else { icons::maximize() };
     let fullscreen = icons::tipped(
-        icons::square_toggle(full_glyph, app.fullscreen, AURORA_PURPLE)
+        icons::square_toggle(full_glyph, app.fullscreen, accent_purple())
             .on_press(Message::ToggleFullscreen),
         "Fullscreen (F)",
     );
@@ -354,12 +357,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // Panels button: toggles the last-used side panel; tabs switch within it.
     let panel_active = app.active_panel.is_some();
     let panels_btn = icons::tipped(
-        icons::square_toggle(icons::panels_menu(), panel_active, AURORA_TEAL)
+        icons::square_toggle(icons::panels_menu(), panel_active, accent_teal())
             .on_press(Message::TogglePanelsMenu),
         "Panels  (Playlist / Browser / Recent / Settings)",
     );
 
-    let mut fit_btn = icons::square_toggle(icons::fit_to_native(), app.fit_menu_open, AURORA_TEAL);
+    let mut fit_btn = icons::square_toggle(icons::fit_to_native(), app.fit_menu_open, accent_teal());
     // The fit menu now works without a video too (heights assume 16:9 when
     // no file is loaded), so only fullscreen disables the button.
     if !app.fullscreen {
@@ -413,7 +416,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .padding(8)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_SURFACE)),
+                background: Some(iced::Background::Color(bg_surface())),
                 ..Default::default()
             })
             .into()
@@ -434,7 +437,7 @@ pub fn seek_hover_popup(
     let seek_bottom = seek_top + 22.0;
     if cy < seek_top || cy > seek_bottom { return None; }
 
-    let panel_w      = if app.active_panel.is_some() { crate::ui::SETTINGS_PANEL_W } else { 0.0 };
+    let panel_w      = app.docked_panel_w();
     let video_col_w  = app.window_w_logical - panel_w;
     // Top row: [pad=8] [seek=fill] [spacing=8] [vol_text?] [spacing=8] [vol_slider] [pad=8]
     // vol_text only rendered when video_col_w >= 750.
@@ -489,18 +492,18 @@ fn seek_slider_style() -> iced::widget::slider::Style {
             backgrounds: (
                 // Active (played) portion: teal -> purple gradient
                 gradient_h(&[
-                    (0.0, super::AURORA_TEAL),
-                    (1.0, super::AURORA_PURPLE),
+                    (0.0, super::accent_teal()),
+                    (1.0, super::accent_purple()),
                 ]),
                 // Inactive (remaining) portion: dim
-                iced::Background::Color(iced::Color::from_rgb(0.18, 0.20, 0.25)),
+                iced::Background::Color(crate::ui::theme::bg_hover()),
             ),
             width: 4.0,
             border: iced::Border { radius: iced::border::Radius::new(2.0), ..Default::default() },
         },
         handle: Handle {
             shape: HandleShape::Circle { radius: 6.0 },
-            background: iced::Background::Color(iced::Color::WHITE),
+            background: iced::Background::Color(crate::ui::theme::text_bright()),
             border_width: 0.0,
             border_color: iced::Color::TRANSPARENT,
         },
@@ -511,22 +514,22 @@ fn volume_slider_style(_volume: f64) -> iced::widget::slider::Style {
     use iced::widget::slider::{Handle, HandleShape, Rail, Style};
     // Gradient: green -> teal -> purple across the full 0-200% range.
     let active = gradient_h(&[
-        (0.0, super::AURORA_GREEN),
-        (0.5, super::AURORA_TEAL),
-        (1.0, super::AURORA_PURPLE),
+        (0.0, super::accent_green()),
+        (0.5, super::accent_teal()),
+        (1.0, super::accent_purple()),
     ]);
     Style {
         rail: Rail {
             backgrounds: (
                 active,
-                iced::Background::Color(iced::Color::from_rgb(0.18, 0.20, 0.25)),
+                iced::Background::Color(crate::ui::theme::bg_hover()),
             ),
             width: 4.0,
             border: iced::Border { radius: iced::border::Radius::new(2.0), ..Default::default() },
         },
         handle: Handle {
             shape: HandleShape::Circle { radius: 5.0 },
-            background: iced::Background::Color(iced::Color::WHITE),
+            background: iced::Background::Color(crate::ui::theme::text_bright()),
             border_width: 0.0,
             border_color: iced::Color::TRANSPARENT,
         },
@@ -603,21 +606,27 @@ pub fn subs_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
         .iter()
         .map(|track| {
             let active = track.id == app.player.current_sid;
-            let fg = if active { AURORA_GREEN } else { TEXT_BRIGHT };
-            iced::widget::button(text(&track.label).size(13).color(fg))
+            // No colour on the text itself: the button's `text_color` is
+            // inherited and recomputed per status, so the label is checked
+            // against the hover fill as well as the idle one. The active
+            // colour is an accent, and a custom theme is free to set an
+            // accent to the button fill's exact value - which made the
+            // selected track invisible until hovered.
+            let base = if active { accent_green() } else { text_bright() };
+            iced::widget::button(text(&track.label).size(13))
                 .width(Length::Fill)
                 .padding([6, 10])
                 .style(move |_t, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
                         Status::Hovered | Status::Pressed => {
-                            iced::Color::from_rgb(0.180, 0.200, 0.235)
+                            crate::ui::theme::bg_hover()
                         }
-                        _ => iced::Color::from_rgb(0.105, 0.115, 0.145),
+                        _ => crate::ui::theme::bg_button(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
-                        text_color: fg,
+                        text_color: crate::ui::theme::ensure_contrast(base, bg, 4.5),
                         border: iced::Border {
                             radius: iced::border::Radius::new(3.0),
                             ..Default::default()
@@ -634,11 +643,11 @@ pub fn subs_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
         .padding(6)
         .width(Length::Fixed(220.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
                 radius: iced::border::Radius::new(6.0),
                 width: 1.0,
-                color: iced::Color::from_rgb(0.180, 0.200, 0.235),
+                color: crate::ui::theme::border(),
             },
             ..Default::default()
         })
@@ -651,18 +660,18 @@ pub fn fit_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
     use iced::widget::Column;
 
     fn entry<'a>(label: String, message: Message) -> Element<'a, Message> {
-        iced::widget::button(text(label).size(13).color(TEXT_BRIGHT))
+        iced::widget::button(text(label).size(13).color(crate::ui::theme::legible_on_chrome(text_bright())))
             .width(Length::Fill)
             .padding([6, 10])
             .style(|_t, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => iced::Color::from_rgb(0.180, 0.200, 0.235),
-                    _ => iced::Color::from_rgb(0.105, 0.115, 0.145),
+                    Status::Hovered | Status::Pressed => crate::ui::theme::bg_hover(),
+                    _ => crate::ui::theme::bg_button(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
-                    text_color: TEXT_BRIGHT,
+                    text_color: text_bright(),
                     border: iced::Border {
                         radius: iced::border::Radius::new(3.0),
                         ..Default::default()
@@ -723,11 +732,11 @@ pub fn fit_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
         .padding(6)
         .width(Length::Fixed(220.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
                 radius: iced::border::Radius::new(6.0),
                 width: 1.0,
-                color: iced::Color::from_rgb(0.180, 0.200, 0.235),
+                color: crate::ui::theme::border(),
             },
             ..Default::default()
         })
@@ -744,21 +753,27 @@ pub fn audio_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
         .iter()
         .map(|track| {
             let active = track.id == app.player.current_aid;
-            let fg = if active { AURORA_PURPLE } else { TEXT_BRIGHT };
-            iced::widget::button(text(&track.label).size(13).color(fg))
+            // No colour on the text itself: the button's `text_color` is
+            // inherited and recomputed per status, so the label is checked
+            // against the hover fill as well as the idle one. The active
+            // colour is an accent, and a custom theme is free to set an
+            // accent to the button fill's exact value - which made the
+            // selected track invisible until hovered.
+            let base = if active { accent_purple() } else { text_bright() };
+            iced::widget::button(text(&track.label).size(13))
                 .width(Length::Fill)
                 .padding([6, 10])
                 .style(move |_t, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
                         Status::Hovered | Status::Pressed => {
-                            iced::Color::from_rgb(0.180, 0.200, 0.235)
+                            crate::ui::theme::bg_hover()
                         }
-                        _ => iced::Color::from_rgb(0.105, 0.115, 0.145),
+                        _ => crate::ui::theme::bg_button(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
-                        text_color: fg,
+                        text_color: crate::ui::theme::ensure_contrast(base, bg, 4.5),
                         border: iced::Border {
                             radius: iced::border::Radius::new(3.0),
                             ..Default::default()
@@ -775,11 +790,11 @@ pub fn audio_popup(app: &super::super::app::MpvNe) -> Element<'_, Message> {
         .padding(6)
         .width(Length::Fixed(220.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
                 radius: iced::border::Radius::new(6.0),
                 width: 1.0,
-                color: iced::Color::from_rgb(0.180, 0.200, 0.235),
+                color: crate::ui::theme::border(),
             },
             ..Default::default()
         })

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use iced::wgpu;
 use iced::widget::shader::{self, Pipeline, Primitive, Viewport};
-use iced::{Color, Element, Length, Rectangle, mouse};
+use iced::{Element, Length, Rectangle, mouse};
 
 use crate::app::{FrameMode, Message, MpvNe, Projection, StereoOutput, StereoSource};
 
@@ -49,10 +49,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         }
     }
     {
-        let bg = Color::from_rgb(0.075, 0.085, 0.110);
+        let bg = crate::ui::theme::bg_deepest();
 
-        let logo = iced::widget::image(app.img_logo.clone())
-            .width(Length::Fixed(160.0));
+        // svg fills its container by default rather than deriving height
+        // from the source, so the wordmark's 241:72 aspect is pinned here.
+        let logo = iced::widget::svg(app.img_logo.clone())
+            .width(Length::Fixed(220.0))
+            .height(Length::Fixed(220.0 * 72.0 / 241.0));
 
         iced::widget::container(logo)
             .width(Length::Fill)
@@ -491,7 +494,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // eye's aspect).
         eye_uv = (in.uv - vec2<f32>(0.5, 0.5)) / u.v0.xy + vec2<f32>(0.5, 0.5);
         if (eye_uv.x < 0.0 || eye_uv.x > 1.0 || eye_uv.y < 0.0 || eye_uv.y > 1.0) {
-            // BG_DEEPEST - matches the outer container so letterbox blends.
+            // bg_deepest() - matches the outer container so letterbox blends.
             return vec4<f32>(0.075, 0.085, 0.110, 1.0);
         }
     } else {

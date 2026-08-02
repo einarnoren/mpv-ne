@@ -6,7 +6,7 @@ use iced::{
     widget::{button, column, container, mouse_area, row, scrollable, stack, text, Space},
 };
 
-use super::{AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_BUTTON, BG_DEEPEST, BG_HOVER, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED};
+use super::{accent_green, accent_purple, accent_teal, bg_button, bg_deepest, bg_hover, bg_surface, text_bright, text_muted};
 use crate::app::{Message, MpvNe, PlaylistSort};
 
 fn trunc(s: &str, max_chars: usize) -> String {
@@ -22,7 +22,7 @@ fn trunc(s: &str, max_chars: usize) -> String {
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let entries: Element<'_, Message> = if app.playlist.is_empty() {
         container(
-            text("No files in playlist").size(12).color(TEXT_MUTED),
+            text("No files in playlist").size(12).color(text_muted()),
         )
         .padding([16, 14])
         .width(Length::Fill)
@@ -47,8 +47,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             };
             let display_name = trunc(&name, 30);
 
-            let label_color = if is_current { AURORA_TEAL } else { TEXT_BRIGHT };
-            let bg_color = if is_current { BG_BUTTON } else { BG_DEEPEST };
+            let label_color = if is_current { accent_teal() } else { text_bright() };
+            let bg_color = if is_current { bg_button() } else { bg_deepest() };
 
             let meta = if let Some(m) = url_meta {
                 let dur = m.duration.map(|d| super::fmt_duration(d)).unwrap_or_default();
@@ -65,7 +65,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             // muted line under it instead of a badge next to the title -
             // it's still visible, just not competing with the title itself.
             let url_line: Option<Element<'_, Message>> = if url_meta.is_some() {
-                Some(text(trunc(&path_str, 40)).size(9).color(TEXT_MUTED).into())
+                Some(text(trunc(&path_str, 40)).size(9).color(text_muted()).into())
             } else {
                 None
             };
@@ -76,12 +76,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             if let Some(url_line) = url_line {
                 title_col = title_col.push(url_line);
             }
-            title_col = title_col.push(text(meta).size(10).color(TEXT_MUTED));
+            title_col = title_col.push(text(meta).size(10).color(text_muted()));
 
             let jump_btn = button(
                 row![
                     container(
-                        text(format!("{:>2}.", i + 1)).size(11).color(TEXT_MUTED),
+                        text(format!("{:>2}.", i + 1)).size(11).color(text_muted()),
                     )
                     .width(Length::Fixed(28.0)),
                     title_col.spacing(1),
@@ -94,14 +94,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    Status::Hovered | Status::Pressed => bg_hover(),
                     _ => bg_color,
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
                         color: if is_current {
-                            Color { a: 0.3, ..AURORA_TEAL }
+                            Color { a: 0.3, ..accent_teal() }
                         } else {
                             Color::TRANSPARENT
                         },
@@ -118,13 +118,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .on_right_press(Message::FileContextMenu(path_c));
 
             let remove_btn = button(
-                text("×").size(13).color(TEXT_MUTED),
+                text("×").size(13).color(text_muted()),
             )
             .padding([4, 7])
             .style(|_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
+                    Status::Hovered | Status::Pressed => bg_hover(),
                     _ => iced::Color::TRANSPARENT,
                 };
                 iced::widget::button::Style {
@@ -164,11 +164,11 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 format!("{:02}:{:02}", s / 60, s % 60)
             };
             let label = ch.title.as_deref().unwrap_or("Chapter");
-            let label_color = if is_current { AURORA_GREEN } else { TEXT_BRIGHT };
+            let label_color = if is_current { accent_green() } else { text_bright() };
 
             button(
                 row![
-                    text(time_str).size(10).color(TEXT_MUTED).width(Length::Fixed(36.0)),
+                    text(time_str).size(10).color(text_muted()).width(Length::Fixed(36.0)),
                     text(format!("{:>2}. {}", i + 1, label))
                         .size(11)
                         .color(label_color),
@@ -181,8 +181,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_DEEPEST,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_deepest(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -197,12 +197,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         Some(
             column![
                 container(
-                    text("Chapters").size(11).color(TEXT_MUTED),
+                    text("Chapters").size(11).color(text_muted()),
                 )
                 .padding([6, 10])
                 .width(Length::Fill)
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_SURFACE)),
+                    background: Some(iced::Background::Color(bg_surface())),
                     ..Default::default()
                 }),
                 column(chapter_rows).width(Length::Fill).spacing(1).padding([2, 4]),
@@ -225,8 +225,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             let rows: Vec<Element<'_, Message>> = bmarks.iter().enumerate().map(|(i, b)| {
                 let jump_btn = button(
                     row![
-                        text(&b.label).size(11).color(AURORA_TEAL).width(Length::Fixed(52.0)),
-                        text("⚑").size(10).color(TEXT_MUTED),
+                        text(&b.label).size(11).color(accent_teal()).width(Length::Fixed(52.0)),
+                        text("⚑").size(10).color(text_muted()),
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),
@@ -236,8 +236,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
-                        Status::Hovered | Status::Pressed => BG_HOVER,
-                        _ => BG_DEEPEST,
+                        Status::Hovered | Status::Pressed => bg_hover(),
+                        _ => bg_deepest(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
@@ -247,12 +247,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 })
                 .on_press(Message::JumpToBookmark(b.position));
 
-                let del_btn = button(text("×").size(13).color(TEXT_MUTED))
+                let del_btn = button(text("×").size(13).color(text_muted()))
                     .padding([4, 7])
                     .style(|_, status| {
                         use iced::widget::button::Status;
                         let bg = match status {
-                            Status::Hovered | Status::Pressed => BG_HOVER,
+                            Status::Hovered | Status::Pressed => bg_hover(),
                             _ => iced::Color::TRANSPARENT,
                         };
                         iced::widget::button::Style {
@@ -271,11 +271,11 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             }).collect();
 
             Some(column![
-                container(text("Bookmarks").size(11).color(TEXT_MUTED))
+                container(text("Bookmarks").size(11).color(text_muted()))
                     .padding([6, 10])
                     .width(Length::Fill)
                     .style(|_| container::Style {
-                        background: Some(iced::Background::Color(BG_SURFACE)),
+                        background: Some(iced::Background::Color(bg_surface())),
                         ..Default::default()
                     }),
                 column(rows).width(Length::Fill).spacing(1).padding([2, 4]),
@@ -289,23 +289,20 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // order (so you can still see and use it) and only playback order is
     // randomised. Shows as active while on, since it now has state.
     let shuffle_on = app.shuffle;
-    let shuffle_btn = button(
-        text("Shuffle")
-            .size(11)
-            .color(if shuffle_on { AURORA_PURPLE } else { TEXT_MUTED }),
-    )
+    let shuffle_btn = button(text("Shuffle").size(11))
     .padding([3, 8])
     .style(move |_, status| {
         use iced::widget::button::Status;
         let bg = match status {
-            Status::Hovered | Status::Pressed => BG_HOVER,
-            _ => if shuffle_on { BG_HOVER } else { BG_BUTTON },
+            Status::Hovered | Status::Pressed => bg_hover(),
+            _ => if shuffle_on { bg_hover() } else { bg_button() },
         };
+        let fg = if shuffle_on { accent_purple() } else { text_muted() };
         iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
-            text_color: if shuffle_on { AURORA_PURPLE } else { TEXT_MUTED },
+            text_color: crate::ui::theme::ensure_contrast(fg, bg, 4.5),
             border: iced::Border {
-                color: if shuffle_on { iced::Color { a: 0.4, ..AURORA_PURPLE } } else { iced::Color::TRANSPARENT },
+                color: if shuffle_on { iced::Color { a: 0.4, ..accent_purple() } } else { iced::Color::TRANSPARENT },
                 width: if shuffle_on { 1.0 } else { 0.0 },
                 radius: iced::border::Radius::new(4.0),
             },
@@ -314,33 +311,38 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     })
     .on_press(Message::ToggleShuffle);
 
-    let sort_btn = button(text("Sort").size(11).color(TEXT_MUTED))
+    let sort_btn = button(text("Sort").size(11))
         .padding([3, 8])
         .style(|_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
+                text_color: crate::ui::theme::ensure_contrast(text_muted(), bg, 4.5),
                 border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                 ..Default::default()
             }
         })
         .on_press(Message::TogglePlaylistSort);
 
+    // `color` is a palette accent, and a custom theme can set an accent to
+    // the same value as the button fill - "Save" in accent 1 vanished exactly
+    // that way. Guarantee the label reads against whatever is behind it.
     let small_btn = |label: &'static str, msg: Message, color: iced::Color| {
-        button(text(label).size(11).color(color))
+        button(text(label).size(11))
             .padding([3, 6])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_BUTTON,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_button(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
+                    text_color: crate::ui::theme::ensure_contrast(color, bg, 4.5),
                     border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                     ..Default::default()
                 }
@@ -348,28 +350,42 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .on_press(msg)
     };
 
-    let footer = container(
-        row![
-            text(format!("{} file{}", app.playlist.len(),
-                if app.playlist.len() == 1 { "" } else { "s" }))
-                .size(11).color(TEXT_MUTED),
-            Space::new().width(Length::Fill),
-            small_btn("+URL", Message::OpenModal(crate::app::ModalKind::AddPlaylistUrl), AURORA_TEAL),
-            small_btn("Load", Message::LoadPlaylist, AURORA_TEAL),
-            small_btn("Save", Message::SavePlaylist, AURORA_GREEN),
-            sort_btn,
-            Space::new().width(Length::Fixed(4.0)),
-            shuffle_btn,
-            Space::new().width(Length::Fixed(8.0)),
-            text(format!("{} / {}", app.playlist_idx + 1, app.playlist.len().max(1)))
-                .size(11).color(TEXT_MUTED),
-        ]
-        .align_y(Alignment::Center),
-    )
-    .padding([6, 12])
+    // Two rows. The panel is often narrow - docked it is a fixed width, and
+    // popped out it can be dragged narrower still - and one row of five
+    // buttons plus two labels ran out of room and clipped. Counts on top,
+    // actions below.
+    let info_row = row![
+        text(format!("{} file{}", app.playlist.len(),
+            if app.playlist.len() == 1 { "" } else { "s" }))
+            .size(11)
+            .color(text_muted())
+            .wrapping(iced::widget::text::Wrapping::None),
+        Space::new().width(Length::Fill),
+        text(format!("{} / {}", app.playlist_idx + 1, app.playlist.len().max(1)))
+            .size(11)
+            .color(text_muted())
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .align_y(Alignment::Center);
+
+    // File actions on the left, view toggles on the right - the two kinds of
+    // thing these buttons do.
+    let action_row = row![
+        small_btn("+URL", Message::OpenModal(crate::app::ModalKind::AddPlaylistUrl), accent_teal()),
+        small_btn("Load", Message::LoadPlaylist, accent_teal()),
+        small_btn("Save", Message::SavePlaylist, accent_green()),
+        Space::new().width(Length::Fill),
+        sort_btn,
+        shuffle_btn,
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    let footer = container(column![info_row, action_row].spacing(6))
+        .padding([6, 10])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     });
 
@@ -389,21 +405,21 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_DEEPEST)),
+        background: Some(iced::Background::Color(bg_deepest())),
         ..Default::default()
     });
 
     // Sort dropdown overlay - floats above the footer when open.
     if app.playlist_sort_open {
         fn sort_item(label: &str, msg: Message) -> Element<'_, Message> {
-            button(text(label).size(12).color(super::TEXT_BRIGHT))
+            button(text(label).size(12).color(super::text_bright()))
                 .padding([6, 14])
                 .width(Length::Fill)
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
-                        Status::Hovered | Status::Pressed => BG_HOVER,
-                        _ => BG_SURFACE,
+                        Status::Hovered | Status::Pressed => bg_hover(),
+                        _ => bg_surface(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
@@ -426,9 +442,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         )
         .width(Length::Fill)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
-                color: Color::from_rgb(0.18, 0.20, 0.24),
+                color: crate::ui::theme::border(),
                 width: 1.0,
                 radius: iced::border::Radius::new(6.0),
             },

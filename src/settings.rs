@@ -192,6 +192,20 @@ pub struct InterfaceSettings {
     /// Play the playlist in random order.
     #[serde(default)]
     pub shuffle: bool,
+    /// Colour theme id - see `ui::theme::Theme::id`. Stored as a string
+    /// rather than an index so reordering the variants can't silently
+    /// change which theme a config selects.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Custom theme colours as `#RRGGBB`, in `ui::theme::CUSTOM_SLOTS`
+    /// order. Empty until the user first selects the Custom theme, at which
+    /// point it's seeded from whatever theme was active.
+    #[serde(default)]
+    pub custom_colors: Vec<String>,
+    /// Which theme the custom colours were seeded from - what a per-slot
+    /// reset restores to.
+    #[serde(default = "default_theme")]
+    pub custom_base: String,
     /// Preset ids (see `app::MOUSE_ACTION_PRESETS`) for the 4 mouse
     /// triggers on the video area.
     #[serde(default = "default_mouse_single_click")]
@@ -207,6 +221,7 @@ pub struct InterfaceSettings {
 fn default_auto_retry_download() -> bool { true }
 fn default_gl_render() -> bool { true }
 fn default_screenshot_subs() -> bool { true }
+fn default_theme() -> String { "aurora".into() }
 fn default_mouse_single_click() -> String { "none".into() }
 fn default_mouse_double_click() -> String { "toggle_fullscreen".into() }
 fn default_mouse_scroll_up() -> String { "volume_up_2".into() }
@@ -234,6 +249,9 @@ impl Default for InterfaceSettings {
             stats_pos_x: None,
             stats_pos_y: None,
             shuffle: false,
+            theme: default_theme(),
+            custom_colors: Vec::new(),
+            custom_base: default_theme(),
             mouse_single_click: default_mouse_single_click(),
             mouse_double_click: default_mouse_double_click(),
             mouse_scroll_up: default_mouse_scroll_up(),

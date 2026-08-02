@@ -5,7 +5,7 @@ use iced::{
     widget::{button, column, container, row, scrollable, text},
 };
 
-use super::{AURORA_GREEN, AURORA_TEAL, BG_DEEPEST, BG_HOVER, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED};
+use super::{accent_green, accent_teal, bg_deepest, bg_hover, bg_surface, text_bright, text_muted};
 use crate::app::{Message, MpvNe};
 
 /// Truncate a string to `max_chars`, appending "..." if needed.
@@ -24,7 +24,7 @@ fn trunc(s: &str, max_chars: usize) -> String {
 /// next to the icon's own padding.
 fn nav_btn<'a>(icon: iced::widget::Svg<'a>, msg: Message, tip: &'static str) -> Element<'a, Message> {
     let btn = super::icons::square_btn(icon).on_press(msg);
-    super::icons::tipped(btn, tip)
+    super::icons::tipped_below(btn, tip)
 }
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
@@ -49,25 +49,25 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     nav_row = nav_row
         .push(nav_btn(super::icons::nav_up(), Message::BrowserNavigateUp, "Up to parent folder"))
         .push(nav_btn(super::icons::nav_pc(), Message::BrowserGoToDrives, "This PC (drive list)"))
-        .push(text(display_loc).size(11).color(TEXT_MUTED));
+        .push(text(display_loc).size(11).color(text_muted()));
 
     let location_bar = container(nav_row)
     .padding([7, 10])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     });
 
     // ── Entry list ───────────────────────────────────────────────────────────
     let entries: Element<'_, Message> = if app.browser_entries.is_empty() {
-        container(text("Empty").size(12).color(TEXT_MUTED))
+        container(text("Empty").size(12).color(text_muted()))
             .padding([16, 14])
             .width(Length::Fill)
             .into()
     } else {
         let rows = app.browser_entries.iter().map(|entry| {
-            let label_color = if entry.is_dir { AURORA_TEAL } else { AURORA_GREEN };
+            let label_color = if entry.is_dir { accent_teal() } else { accent_green() };
             let display_name = trunc(&entry.name, 32);
             let msg = if entry.is_dir {
                 Message::BrowserNavigate(entry.path.clone())
@@ -91,7 +91,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             };
 
             let meta_el: Element<'_, Message> = if !meta_str.is_empty() {
-                text(meta_str).size(10).color(TEXT_MUTED).into()
+                text(meta_str).size(10).color(text_muted()).into()
             } else {
                 iced::widget::Space::new().into()
             };
@@ -100,7 +100,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 row![
                     accent,
                     column![
-                        text(display_name).size(12).color(TEXT_BRIGHT),
+                        text(display_name).size(12).color(text_bright()),
                         meta_el,
                     ]
                     .spacing(1),
@@ -113,8 +113,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .style(|_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_DEEPEST,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_deepest(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -161,11 +161,11 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             if f == 1 { "" } else { "s" }),
     };
 
-    let footer = container(text(footer_text).size(11).color(TEXT_MUTED))
+    let footer = container(text(footer_text).size(11).color(text_muted()))
         .padding([6, 12])
         .width(Length::Fill)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             ..Default::default()
         });
 
@@ -177,7 +177,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_DEEPEST)),
+        background: Some(iced::Background::Color(bg_deepest())),
         ..Default::default()
     })
     .into()

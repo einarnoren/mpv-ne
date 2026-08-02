@@ -21,8 +21,8 @@ use iced::{
 };
 
 use super::{
-    AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_BUTTON, BG_DEEPEST, BG_HOVER,
-    BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED,
+    accent_green, accent_purple, accent_teal, bg_button, bg_deepest, bg_hover,
+    bg_surface, text_bright, text_muted,
 };
 use crate::app::{AfterPlayback, FrameMode, Message, MpvNe, Projection, StereoOutput, StereoSource};
 use crate::player::{AudioTrack, SubTrack};
@@ -237,24 +237,24 @@ const CATEGORY_ANCHORS: &[(&str, f32)] = &[
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let header = container(
-        text("Playback settings").size(13).color(TEXT_BRIGHT),
+        text("Playback settings").size(13).color(text_bright()),
     )
     .padding([8, 12])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     });
 
     let nav = container(
         row(CATEGORY_ANCHORS.iter().map(|(label, y)| {
-            button(text(*label).size(10).color(TEXT_MUTED))
+            button(text(*label).size(10).color(crate::ui::theme::legible_on_chrome(text_muted())))
                 .padding([3, 6])
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
-                        Status::Hovered | Status::Pressed => BG_HOVER,
-                        _ => BG_BUTTON,
+                        Status::Hovered | Status::Pressed => bg_hover(),
+                        _ => bg_button(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
@@ -271,7 +271,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .padding([4, 12])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     });
 
@@ -303,7 +303,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_DEEPEST)),
+        background: Some(iced::Background::Color(bg_deepest())),
         ..Default::default()
     })
     .into()
@@ -323,11 +323,11 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
                     if app.precise_seek { "Precise (exact)" } else { "Fast (keyframe)" },
                     app.precise_seek,
                     Message::TogglePreciseSeek,
-                    AURORA_TEAL,
+                    accent_teal(),
                 ),
             ],
             row![
-                text("Step").size(11).color(TEXT_MUTED),
+                text("Step").size(11).color(text_muted()),
                 Space::new().width(Length::Fixed(6.0)),
                 nudge_btn("-1s", Message::SeekStepAdjust(-1.0)),
                 value_label(format!("{:.0}s", app.seek_step_secs)),
@@ -364,7 +364,7 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
                 if app.muted { "Muted" } else { "Mute" },
                 app.muted,
                 Message::ToggleMute,
-                AURORA_PURPLE,
+                accent_purple(),
             ),
         ].into()),
         gap(),
@@ -376,7 +376,7 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
                     if app.audio_normalize { "On" } else { "Off" },
                     app.audio_normalize,
                     Message::ToggleAudioNormalize,
-                    AURORA_GREEN,
+                    accent_green(),
                 ),
             ].into(),
         ),
@@ -416,7 +416,7 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
                 if app.sub_visible { "Shown" } else { "Hidden" },
                 app.sub_visible,
                 Message::ToggleSubVisibility,
-                AURORA_TEAL,
+                accent_teal(),
             ),
         ].into()),
         gap(),
@@ -427,20 +427,20 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         ),
         gap(),
         section("Load", column![
-            action_btn("Open subtitle file...", Message::LoadSubtitle, AURORA_TEAL),
-            action_btn("Search OpenSubtitles…",  Message::OpenSubSearch, AURORA_GREEN),
+            action_btn("Open subtitle file...", Message::LoadSubtitle, accent_teal()),
+            action_btn("Search OpenSubtitles…",  Message::OpenSubSearch, accent_green()),
         ].spacing(4).into()),
         gap(),
         // ── Video ─────────────────────────────────────────────────
         category("Video"),
         section("Frame fit", row![
-            button(text(format!("{} (cycle)", app.frame_mode.label())).size(12).color(TEXT_BRIGHT))
+            button(text(format!("{} (cycle)", app.frame_mode.label())).size(12).color(crate::ui::theme::legible_on_chrome(text_bright())))
                 .padding([5, 10])
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     let bg = match status {
-                        Status::Hovered | Status::Pressed => BG_HOVER,
-                        _ => BG_BUTTON,
+                        Status::Hovered | Status::Pressed => bg_hover(),
+                        _ => bg_button(),
                     };
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(bg)),
@@ -478,8 +478,8 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         section("AB repeat", ab_row(app)),
         gap(),
         section("Navigate", column![
-            action_btn("Open URL / stream...", Message::OpenUrl,    AURORA_TEAL),
-            action_btn("Jump to time (Ctrl+G)", Message::JumpToTime, AURORA_TEAL),
+            action_btn("Open URL / stream...", Message::OpenUrl,    accent_teal()),
+            action_btn("Jump to time (Ctrl+G)", Message::JumpToTime, accent_teal()),
         ].spacing(4).into()),
         gap(),
         section("After playback", after_playback_row(app)),
@@ -526,7 +526,7 @@ fn speed_row(app: &SettingsSnapshot) -> Element<'static, Message> {
         .spacing(6)
         .align_y(Alignment::Center),
         row![
-            text("Step").size(11).color(TEXT_MUTED),
+            text("Step").size(11).color(text_muted()),
             Space::new().width(Length::Fixed(6.0)),
             nudge_btn("-0.05", Message::SpeedStepAdjust(-0.05)),
             value_label(format!("{:.2}", app.speed_step)),
@@ -551,21 +551,21 @@ fn options_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let hwdec = app.hwdec.clone();
     column![
         row![
-            toggle_btn("Loop file",     app.loop_file,     Message::ToggleLoopFile,     AURORA_TEAL),
-            toggle_btn("Loop playlist", app.loop_playlist, Message::ToggleLoopPlaylist, AURORA_TEAL),
+            toggle_btn("Loop file",     app.loop_file,     Message::ToggleLoopFile,     accent_teal()),
+            toggle_btn("Loop playlist", app.loop_playlist, Message::ToggleLoopPlaylist, accent_teal()),
         ]
         .spacing(6),
         row![
-            toggle_btn("Shuffle", app.shuffle, Message::ToggleShuffle, AURORA_GREEN),
+            toggle_btn("Shuffle", app.shuffle, Message::ToggleShuffle, accent_green()),
         ]
         .spacing(6),
         row![
-            toggle_btn("Deinterlace",  app.deinterlace, Message::ToggleDeinterlace, AURORA_PURPLE),
+            toggle_btn("Deinterlace",  app.deinterlace, Message::ToggleDeinterlace, accent_purple()),
         ]
         .spacing(6),
         // Hardware decode mode selector.
         row![
-            toggle_btn(hw_label, hw_active, Message::ToggleHwDec, AURORA_TEAL),
+            toggle_btn(hw_label, hw_active, Message::ToggleHwDec, accent_teal()),
             Space::new().width(Length::Fixed(4.0)),
             hwdec_btn("auto",    hwdec.clone()),
             hwdec_btn("nvdec",   hwdec.clone()),
@@ -581,19 +581,19 @@ fn options_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 
 fn hwdec_btn(mode: &'static str, current: String) -> Element<'static, Message> {
     let active = current == mode || (mode == "auto" && current.starts_with("auto"));
-    let color = if active { AURORA_TEAL } else { TEXT_MUTED };
-    button(text(mode).size(10).color(color))
+    let color = if active { accent_teal() } else { text_muted() };
+    button(text(mode).size(10).color(crate::ui::theme::legible_on_chrome(color)))
         .padding([3, 6])
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => if active { BG_HOVER } else { BG_BUTTON },
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => if active { bg_hover() } else { bg_button() },
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
                 border: iced::Border {
-                    color: if active { iced::Color { a: 0.4, ..AURORA_TEAL } } else { iced::Color::TRANSPARENT },
+                    color: if active { iced::Color { a: 0.4, ..accent_teal() } } else { iced::Color::TRANSPARENT },
                     width: if active { 1.0 } else { 0.0 },
                     radius: iced::border::Radius::new(3.0),
                 },
@@ -639,16 +639,16 @@ fn delay_row(
 fn sub_appearance_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
     column![
         row![
-            text("Size").size(11).color(TEXT_MUTED).width(Length::Fixed(46.0)),
+            text("Size").size(11).color(text_muted()).width(Length::Fixed(46.0)),
             slider(10.0f64..=200.0, app.sub_font_size as f64,
                 |v| Message::SubFontSizeSet(v as i64))
                 .step(1.0)
                 .width(Length::Fill),
-            container(text(format!("{}", app.sub_font_size)).size(11).color(TEXT_BRIGHT))
+            container(text(format!("{}", app.sub_font_size)).size(11).color(text_bright()))
                 .padding([2, 6])
                 .width(Length::Fixed(36.0))
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_BUTTON)),
+                    background: Some(iced::Background::Color(bg_button())),
                     border: iced::Border { radius: iced::border::Radius::new(3.0), ..Default::default() },
                     ..Default::default()
                 }),
@@ -656,16 +656,16 @@ fn sub_appearance_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
         .spacing(6)
         .align_y(Alignment::Center),
         row![
-            text("Pos").size(11).color(TEXT_MUTED).width(Length::Fixed(46.0)),
+            text("Pos").size(11).color(text_muted()).width(Length::Fixed(46.0)),
             slider(0.0f64..=150.0, app.sub_pos as f64,
                 |v| Message::SubPosSet(v as i64))
                 .step(1.0)
                 .width(Length::Fill),
-            container(text(format!("{}", app.sub_pos)).size(11).color(TEXT_BRIGHT))
+            container(text(format!("{}", app.sub_pos)).size(11).color(text_bright()))
                 .padding([2, 6])
                 .width(Length::Fixed(36.0))
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_BUTTON)),
+                    background: Some(iced::Background::Color(bg_button())),
                     border: iced::Border { radius: iced::border::Radius::new(3.0), ..Default::default() },
                     ..Default::default()
                 }),
@@ -691,13 +691,13 @@ fn aspect_row() -> Element<'static, Message> {
     let mut bot = iced::widget::Row::new().spacing(4);
     for (idx, (label, ratio)) in PRESETS.iter().enumerate() {
         let ratio_s = ratio.to_string();
-        let btn = button(text(*label).size(11).color(TEXT_BRIGHT))
+        let btn = button(text(*label).size(11).color(crate::ui::theme::legible_on_chrome(text_bright())))
             .padding([4, 8])
             .style(|_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_BUTTON,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_button(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -749,7 +749,7 @@ fn audio_eq_section(app: &SettingsSnapshot) -> Element<'static, Message> {
             if app.eq_enabled { "On" } else { "Off" },
             app.eq_enabled,
             Message::ToggleAudioEq,
-            AURORA_GREEN,
+            accent_green(),
         ),
         Space::new().width(Length::Fill),
         reset_btn(Message::AudioEqReset),
@@ -759,7 +759,7 @@ fn audio_eq_section(app: &SettingsSnapshot) -> Element<'static, Message> {
     let mut bands = iced::widget::Row::new().spacing(4).align_y(Alignment::End);
     for (i, (label, _freq)) in crate::player::EQ_BANDS.iter().enumerate() {
         let gain = app.eq_gains.get(i).copied().unwrap_or(0.0);
-        let gain_color = if gain.abs() > 0.05 { AURORA_TEAL } else { TEXT_MUTED };
+        let gain_color = if gain.abs() > 0.05 { accent_teal() } else { text_muted() };
         let band_col = column![
             text(format!("{gain:+.0}")).size(9).color(gain_color),
             iced::widget::VerticalSlider::new(-12.0..=12.0, gain, move |v| Message::EqBandSet(i, v))
@@ -767,7 +767,7 @@ fn audio_eq_section(app: &SettingsSnapshot) -> Element<'static, Message> {
                 .height(Length::Fixed(84.0))
                 .width(12.0)
                 .style(settings_slider_style),
-            text(*label).size(9).color(TEXT_MUTED),
+            text(*label).size(9).color(text_muted()),
         ]
         .spacing(4)
         .align_x(iced::alignment::Horizontal::Center);
@@ -798,9 +798,9 @@ fn eq_row(
     value: i64,
     on_change: impl Fn(i64) -> Message + 'static,
 ) -> Element<'static, Message> {
-    let color = if value == 0 { TEXT_MUTED } else { TEXT_BRIGHT };
+    let color = if value == 0 { text_muted() } else { text_bright() };
     row![
-        text(label).size(11).color(TEXT_MUTED).width(Length::Fixed(66.0)),
+        text(label).size(11).color(text_muted()).width(Length::Fixed(66.0)),
         slider(-100.0f64..=100.0, value as f64, move |v| on_change(v as i64))
             .step(1.0)
             .width(Length::Fill)
@@ -811,7 +811,7 @@ fn eq_row(
         .padding([2, 6])
         .width(Length::Fixed(36.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_BUTTON)),
+            background: Some(iced::Background::Color(bg_button())),
             border: iced::Border {
                 radius: iced::border::Radius::new(3.0),
                 ..Default::default()
@@ -826,13 +826,13 @@ fn eq_row(
 
 fn transform_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let btn = |label: &'static str, msg: Message| {
-        button(text(label).size(11).color(TEXT_BRIGHT))
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(text_bright())))
             .padding([4, 8])
             .style(|_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_BUTTON,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_button(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -849,7 +849,7 @@ fn transform_row(app: &SettingsSnapshot) -> Element<'static, Message> {
             btn("↻ 90°", Message::VideoRotateCw),
             btn("↺ 90°", Message::VideoRotateCcw),
             Space::new().width(Length::Fixed(4.0)),
-            text(rot_label).size(11).color(TEXT_MUTED),
+            text(rot_label).size(11).color(text_muted()),
         ].spacing(4).align_y(Alignment::Center),
         row![
             btn("⇔ H-flip", Message::VideoHFlip),
@@ -858,7 +858,7 @@ fn transform_row(app: &SettingsSnapshot) -> Element<'static, Message> {
             text(format!("{}{}",
                 if app.video_hflip { "H " } else { "" },
                 if app.video_vflip { "V" } else { "" },
-            )).size(11).color(AURORA_TEAL),
+            )).size(11).color(accent_teal()),
         ].spacing(4).align_y(Alignment::Center),
         btn("Reset transform", Message::VideoTransformReset),
     ]
@@ -871,13 +871,13 @@ fn transform_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 /// options to fit a narrow settings panel).
 fn window_size_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let btn = |label: String, msg: Message| {
-        button(text(label).size(11).color(TEXT_BRIGHT))
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(text_bright())))
             .padding([4, 8])
             .style(|_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => BG_BUTTON,
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => bg_button(),
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -889,7 +889,7 @@ fn window_size_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     };
 
     if !app.has_video {
-        return text("No video loaded").size(11).color(TEXT_MUTED).into();
+        return text("No video loaded").size(11).color(text_muted()).into();
     }
 
     column![
@@ -910,19 +910,19 @@ fn window_size_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn stream_quality_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let opt = |label: &'static str, height: u32| {
         let active = app.stream_quality_height == height;
-        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
-        button(text(label).size(11).color(color))
+        let color = if active { accent_green() } else { text_muted() };
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(color)))
             .padding([4, 8])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
-                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        color: if active { iced::Color { a: 0.4, ..accent_green() } } else { iced::Color::TRANSPARENT },
                         width: if active { 1.0 } else { 0.0 },
                         radius: iced::border::Radius::new(4.0),
                     },
@@ -951,19 +951,19 @@ fn stream_quality_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn after_playback_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let opt = |label: &'static str, val: AfterPlayback| {
         let active = app.after_playback == val;
-        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
-        button(text(label).size(11).color(color))
+        let color = if active { accent_green() } else { text_muted() };
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(color)))
             .padding([4, 8])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
-                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        color: if active { iced::Color { a: 0.4, ..accent_green() } } else { iced::Color::TRANSPARENT },
                         width: if active { 1.0 } else { 0.0 },
                         radius: iced::border::Radius::new(4.0),
                     },
@@ -986,19 +986,19 @@ fn after_playback_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
     let source_opt = |label: &'static str, val: StereoSource| {
         let active = app.stereo_source == val;
-        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
-        button(text(label).size(11).color(color))
+        let color = if active { accent_green() } else { text_muted() };
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(color)))
             .padding([4, 8])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
-                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        color: if active { iced::Color { a: 0.4, ..accent_green() } } else { iced::Color::TRANSPARENT },
                         width: if active { 1.0 } else { 0.0 },
                         radius: iced::border::Radius::new(4.0),
                     },
@@ -1009,19 +1009,19 @@ fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
     };
     let output_opt = |label: &'static str, val: StereoOutput| {
         let active = app.stereo_output == val;
-        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
-        button(text(label).size(11).color(color))
+        let color = if active { accent_green() } else { text_muted() };
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(color)))
             .padding([4, 8])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
-                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        color: if active { iced::Color { a: 0.4, ..accent_green() } } else { iced::Color::TRANSPARENT },
                         width: if active { 1.0 } else { 0.0 },
                         radius: iced::border::Radius::new(4.0),
                     },
@@ -1033,7 +1033,7 @@ fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
 
     column![
         row![
-            text("Source").size(11).color(TEXT_MUTED),
+            text("Source").size(11).color(text_muted()),
             Space::new().width(Length::Fixed(6.0)),
             source_opt("Mono (2D)",      StereoSource::Mono),
             source_opt("Side-by-side",   StereoSource::SideBySide),
@@ -1042,7 +1042,7 @@ fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
         .spacing(4)
         .align_y(Alignment::Center),
         row![
-            text("Output").size(11).color(TEXT_MUTED),
+            text("Output").size(11).color(text_muted()),
             Space::new().width(Length::Fixed(6.0)),
             output_opt("Left eye",   StereoOutput::LeftEye),
             output_opt("Right eye",  StereoOutput::RightEye),
@@ -1058,19 +1058,19 @@ fn stereo_3d_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn vr_projection_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
     let proj_opt = |label: &'static str, val: Projection| {
         let active = app.projection == val;
-        let color = if active { AURORA_GREEN } else { TEXT_MUTED };
-        button(text(label).size(11).color(color))
+        let color = if active { accent_green() } else { text_muted() };
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(color)))
             .padding([4, 8])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
                     border: iced::Border {
-                        color: if active { iced::Color { a: 0.4, ..AURORA_GREEN } } else { iced::Color::TRANSPARENT },
+                        color: if active { iced::Color { a: 0.4, ..accent_green() } } else { iced::Color::TRANSPARENT },
                         width: if active { 1.0 } else { 0.0 },
                         radius: iced::border::Radius::new(4.0),
                     },
@@ -1089,7 +1089,7 @@ fn vr_projection_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
         .spacing(4)
         .align_y(Alignment::Center),
         row![
-            text("Field of view").size(11).color(TEXT_MUTED),
+            text("Field of view").size(11).color(text_muted()),
             Space::new().width(Length::Fixed(6.0)),
             nudge_btn("-5°", Message::VrFovAdjust(-5.0)),
             value_label(format!("{:.0}°", app.vr_fov_deg)),
@@ -1109,20 +1109,20 @@ fn vr_projection_rows(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn settings_slider_style(_t: &iced::Theme, _s: iced::widget::slider::Status) -> iced::widget::slider::Style {
     use iced::widget::slider::{Handle, HandleShape, Rail, Style};
     let mut g = iced::gradient::Linear::new(Radians(std::f32::consts::FRAC_PI_2));
-    g = g.add_stop(0.0, AURORA_TEAL);
-    g = g.add_stop(1.0, AURORA_PURPLE);
+    g = g.add_stop(0.0, accent_teal());
+    g = g.add_stop(1.0, accent_purple());
     Style {
         rail: Rail {
             backgrounds: (
                 iced::Background::Gradient(iced::Gradient::Linear(g)),
-                iced::Background::Color(iced::Color::from_rgb(0.18, 0.20, 0.25)),
+                iced::Background::Color(crate::ui::theme::bg_hover()),
             ),
             width: 3.0,
             border: iced::Border { radius: iced::border::Radius::new(2.0), ..Default::default() },
         },
         handle: Handle {
             shape: HandleShape::Circle { radius: 5.0 },
-            background: iced::Background::Color(iced::Color::WHITE),
+            background: iced::Background::Color(crate::ui::theme::text_bright()),
             border_width: 0.0,
             border_color: iced::Color::TRANSPARENT,
         },
@@ -1144,13 +1144,13 @@ fn ab_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     let b_label = app.ab_loop_b.map(fmt).unwrap_or_else(|| "B: --:--:--".into());
 
     let btn = |label: String, msg: Message, active: bool, color: iced::Color| {
-        button(text(label).size(11).color(if active { color } else { TEXT_MUTED }))
+        button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(if active { color } else { text_muted() })))
             .padding([4, 10])
             .style(move |_, status| {
                 use iced::widget::button::Status;
                 let bg = match status {
-                    Status::Hovered | Status::Pressed => BG_HOVER,
-                    _ => if active { BG_HOVER } else { BG_BUTTON },
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if active { bg_hover() } else { bg_button() },
                 };
                 iced::widget::button::Style {
                     background: Some(iced::Background::Color(bg)),
@@ -1178,18 +1178,18 @@ fn ab_row(app: &SettingsSnapshot) -> Element<'static, Message> {
     };
 
     let clear_el: Element<'static, Message> = if ab_active {
-        btn("Clear".to_string(), Message::AbLoopClear, true, AURORA_PURPLE).into()
+        btn("Clear".to_string(), Message::AbLoopClear, true, accent_purple()).into()
     } else {
         Space::new().into()
     };
 
     column![
         row![
-            btn(a_label, Message::AbLoopSetA, app.ab_loop_a.is_some(), AURORA_GREEN),
-            btn(b_label, Message::AbLoopSetB, app.ab_loop_b.is_some(), AURORA_TEAL),
+            btn(a_label, Message::AbLoopSetA, app.ab_loop_a.is_some(), accent_green()),
+            btn(b_label, Message::AbLoopSetB, app.ab_loop_b.is_some(), accent_teal()),
             clear_el,
         ].spacing(6).align_y(iced::Alignment::Center),
-        text(status_text).size(10).color(TEXT_MUTED),
+        text(status_text).size(10).color(text_muted()),
     ]
     .spacing(4)
     .into()
@@ -1197,14 +1197,14 @@ fn ab_row(app: &SettingsSnapshot) -> Element<'static, Message> {
 
 /// Track-select pill button, shared shape for both audio and subtitle lists.
 fn track_btn(label: String, active: bool, msg: Message, color: iced::Color) -> Element<'static, Message> {
-    button(text(label).size(11).color(if active { color } else { TEXT_MUTED }))
+    button(text(label).size(11).color(crate::ui::theme::legible_on_chrome(if active { color } else { text_muted() })))
         .padding([4, 8])
         .width(Length::Fill)
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => if active { BG_HOVER } else { BG_BUTTON },
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => if active { bg_hover() } else { bg_button() },
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
@@ -1222,17 +1222,17 @@ fn track_btn(label: String, active: bool, msg: Message, color: iced::Color) -> E
 
 fn audio_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
     if app.audio_tracks.is_empty() {
-        return text("No audio tracks").size(11).color(TEXT_MUTED).into();
+        return text("No audio tracks").size(11).color(text_muted()).into();
     }
     let rows = app.audio_tracks.iter().map(|t| {
-        track_btn(t.label.clone(), t.id == app.current_aid, Message::AudioTrackSelected(t.clone()), AURORA_PURPLE)
+        track_btn(t.label.clone(), t.id == app.current_aid, Message::AudioTrackSelected(t.clone()), accent_purple())
     });
     column(rows).spacing(4).into()
 }
 
 fn sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
     if app.sub_tracks.is_empty() {
-        return text("No subtitle tracks").size(11).color(TEXT_MUTED).into();
+        return text("No subtitle tracks").size(11).color(text_muted()).into();
     }
     let current = app.sub_tracks.iter().find(|t| t.id == app.current_sid).cloned();
     iced::widget::pick_list(
@@ -1248,7 +1248,7 @@ fn sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
 
 fn secondary_sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
     if app.sub_tracks.is_empty() {
-        return text("No subtitle tracks").size(11).color(TEXT_MUTED).into();
+        return text("No subtitle tracks").size(11).color(text_muted()).into();
     }
     let current = app.sub_tracks.iter().find(|t| t.id == app.current_secondary_sid).cloned();
     iced::widget::pick_list(
@@ -1273,19 +1273,19 @@ fn lang_input(value: String, on_input: impl Fn(String) -> Message + 'static) -> 
         .style(|_, status| {
             use iced::widget::text_input::Status;
             iced::widget::text_input::Style {
-                background: iced::Background::Color(BG_BUTTON),
+                background: iced::Background::Color(bg_button()),
                 border: iced::Border {
                     color: match status {
-                        Status::Focused { .. } => AURORA_TEAL,
-                        _ => BG_HOVER,
+                        Status::Focused { .. } => accent_teal(),
+                        _ => bg_hover(),
                     },
                     width: 1.0,
                     radius: iced::border::Radius::new(4.0),
                 },
-                icon: TEXT_MUTED,
-                placeholder: TEXT_MUTED,
-                value: TEXT_BRIGHT,
-                selection: iced::Color { a: 0.3, ..AURORA_TEAL },
+                icon: text_muted(),
+                placeholder: text_muted(),
+                value: text_bright(),
+                selection: iced::Color { a: 0.3, ..accent_teal() },
             }
         })
         .into()
@@ -1302,23 +1302,23 @@ fn screenshot_section(app: &SettingsSnapshot) -> Element<'static, Message> {
     };
     column![
         row![
-            action_btn("Take screenshot", Message::TakeScreenshot, AURORA_GREEN),
+            action_btn("Take screenshot", Message::TakeScreenshot, accent_green()),
             toggle_btn(
                 "Subtitles",
                 app.screenshot_subs,
                 Message::ToggleScreenshotSubs,
-                AURORA_TEAL,
+                accent_teal(),
             ),
         ]
         .spacing(4),
         column![
-            text("Saves to:").size(11).color(TEXT_MUTED),
-            text(dir_label).size(11).color(TEXT_BRIGHT),
+            text("Saves to:").size(11).color(text_muted()),
+            text(dir_label).size(11).color(text_bright()),
         ]
         .spacing(2),
         row![
             Space::new().width(Length::Fill),
-            action_btn("Change…", Message::ChooseScreenshotDir, AURORA_TEAL),
+            action_btn("Change…", Message::ChooseScreenshotDir, accent_teal()),
         ]
         .align_y(iced::Alignment::Center),
     ]
@@ -1329,7 +1329,7 @@ fn screenshot_section(app: &SettingsSnapshot) -> Element<'static, Message> {
 fn section(label: &'static str, content: Element<'static, Message>) -> Element<'static, Message> {
     container(
         column![
-            text(label).size(13).color(TEXT_BRIGHT),
+            text(label).size(13).color(text_bright()),
             content,
         ]
         .spacing(8),
@@ -1337,7 +1337,7 @@ fn section(label: &'static str, content: Element<'static, Message>) -> Element<'
     .padding([12, 14])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     })
     .into()
@@ -1349,8 +1349,8 @@ fn section(label: &'static str, content: Element<'static, Message>) -> Element<'
 fn section_sub(label: &'static str, subtext: &'static str, content: Element<'static, Message>) -> Element<'static, Message> {
     container(
         column![
-            text(label).size(13).color(TEXT_BRIGHT),
-            text(subtext).size(10).color(TEXT_MUTED),
+            text(label).size(13).color(text_bright()),
+            text(subtext).size(10).color(text_muted()),
             content,
         ]
         .spacing(6),
@@ -1358,7 +1358,7 @@ fn section_sub(label: &'static str, subtext: &'static str, content: Element<'sta
     .padding([12, 14])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     })
     .into()
@@ -1368,7 +1368,7 @@ fn section_sub(label: &'static str, subtext: &'static str, content: Element<'sta
 /// (Playback / Audio / Subtitles / Video / Playback control / Other).
 fn category(label: &'static str) -> Element<'static, Message> {
     container(
-        text(label.to_uppercase()).size(12).color(AURORA_TEAL),
+        text(label.to_uppercase()).size(12).color(accent_teal()),
     )
     .padding(iced::Padding { top: 16.0, bottom: 6.0, left: 14.0, right: 14.0 })
     .width(Length::Fill)
@@ -1380,17 +1380,17 @@ fn gap() -> Element<'static, Message> {
 }
 
 fn nudge_btn(label: impl ToString, msg: Message) -> Element<'static, Message> {
-    button(text(label.to_string()).size(11).color(TEXT_BRIGHT))
+    button(text(label.to_string()).size(11).color(crate::ui::theme::legible_on_chrome(text_bright())))
         .padding([4, 7])
         .style(|_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color: TEXT_BRIGHT,
+                text_color: text_bright(),
                 border: iced::Border {
                     radius: iced::border::Radius::new(4.0),
                     ..Default::default()
@@ -1409,14 +1409,14 @@ fn toggle_btn(
     msg: Message,
     color: iced::Color,
 ) -> Element<'static, Message> {
-    let text_color = if active { color } else { TEXT_MUTED };
-    button(text(label.to_string()).size(12).color(text_color))
+    let text_color = if active { color } else { text_muted() };
+    button(text(label.to_string()).size(12).color(crate::ui::theme::legible_on_chrome(text_color)))
         .padding([5, 10])
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => if active { BG_HOVER } else { BG_BUTTON },
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => if active { bg_hover() } else { bg_button() },
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
@@ -1434,10 +1434,10 @@ fn toggle_btn(
 }
 
 fn value_label(s: String) -> Element<'static, Message> {
-    container(text(s).size(13).color(TEXT_BRIGHT))
+    container(text(s).size(13).color(text_bright()))
         .padding([4, 10])
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_BUTTON)),
+            background: Some(iced::Background::Color(bg_button())),
             border: iced::Border {
                 radius: iced::border::Radius::new(4.0),
                 ..Default::default()
@@ -1449,17 +1449,17 @@ fn value_label(s: String) -> Element<'static, Message> {
 
 
 fn reset_btn(msg: Message) -> Element<'static, Message> {
-    button(text("Reset").size(11).color(AURORA_TEAL))
+    button(text("Reset").size(11).color(crate::ui::theme::legible_on_chrome(accent_teal())))
         .padding([4, 8])
         .style(|_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color: AURORA_TEAL,
+                text_color: crate::ui::theme::legible_on_chrome(accent_teal()),
                 border: iced::Border {
                     radius: iced::border::Radius::new(4.0),
                     ..Default::default()
@@ -1472,17 +1472,17 @@ fn reset_btn(msg: Message) -> Element<'static, Message> {
 }
 
 fn action_btn(label: &'static str, msg: Message, color: iced::Color) -> Element<'static, Message> {
-    button(text(label).size(13).color(color))
+    button(text(label).size(13).color(crate::ui::theme::legible_on_chrome(color)))
         .padding([6, 14])
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color: color,
+                text_color: crate::ui::theme::legible_on_chrome(color),
                 border: iced::Border {
                     radius: iced::border::Radius::new(4.0),
                     ..Default::default()

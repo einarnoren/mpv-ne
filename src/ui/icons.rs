@@ -9,27 +9,45 @@
 use iced::widget::{button, container, svg, text, tooltip, Button, Svg};
 use iced::{Border, Color, Element, Length, Padding};
 
-use super::{BG_BUTTON, BG_HOVER, BG_DEEPEST, TEXT_BRIGHT};
+use super::{bg_button, bg_hover, bg_deepest, text_bright};
 
 const ICON_SIZE: u16 = 18;
 const BTN_SIZE: f32 = 30.0;
-/// Default monochrome icon fill - slightly cool light grey.
-const ICON_HEX: &str = "#C5CDD9";
-/// Same color as `ICON_HEX`, as an `iced::Color` for SVG tint styling
+
+/// Monochrome icon fill, as a hex string to substitute into SVG source.
+///
+/// This follows the active theme's text colour rather than being a fixed
+/// light grey: the icons are painted on the same surfaces as text, so on a
+/// light theme a fixed light fill left them nearly invisible.
+fn icon_hex() -> String {
+    super::theme::to_hex(super::theme::icon())
+}
+
+/// Same colour as `icon_hex`, as an `iced::Color` for SVG tint styling
 /// (see `square_toggle`) rather than baked into SVG source text.
-const ICON_COLOR: Color = Color::from_rgb(0.773, 0.804, 0.851);
+fn icon_color() -> Color {
+    super::theme::icon()
+}
 
 /// Standard idle 36×36 icon button.
 pub fn square_btn<'a, Message: Clone + 'a>(icon: Svg<'a>) -> Button<'a, Message> {
     let bg = move |_t: &iced::Theme, status: iced::widget::button::Status| {
         use iced::widget::button::Status;
+        // Disabled buttons never receive Hovered, so without a distinct look
+        // they appear identical to live ones and simply seem unresponsive -
+        // which is what a transport bar with no file loaded looked like.
         let bg = match status {
-            Status::Hovered | Status::Pressed => BG_HOVER,
-            _ => BG_BUTTON,
+            Status::Hovered | Status::Pressed => bg_hover(),
+            Status::Disabled => Color { a: 0.35, ..bg_button() },
+            _ => bg_button(),
         };
         iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
-            text_color: TEXT_BRIGHT,
+            text_color: if matches!(status, Status::Disabled) {
+                Color { a: 0.4, ..text_bright() }
+            } else {
+                text_bright()
+            },
             border: Border {
                 radius: iced::border::Radius::new(4.0),
                 ..Default::default()
@@ -61,11 +79,11 @@ pub fn square_toggle<'a, Message: Clone + 'a>(
             active_color
         } else {
             match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             }
         };
-        let fg = if active { BG_DEEPEST } else { TEXT_BRIGHT };
+        let fg = if active { bg_deepest() } else { text_bright() };
         iced::widget::button::Style {
             background: Some(iced::Background::Color(bg)),
             text_color: fg,
@@ -77,7 +95,7 @@ pub fn square_toggle<'a, Message: Clone + 'a>(
         }
     };
     let icon = icon.style(move |_theme, _status| iced::widget::svg::Style {
-        color: Some(if active { BG_DEEPEST } else { ICON_COLOR }),
+        color: Some(if active { bg_deepest() } else { icon_color() }),
     });
     button(icon)
         .width(Length::Fixed(BTN_SIZE))
@@ -87,23 +105,43 @@ pub fn square_toggle<'a, Message: Clone + 'a>(
 }
 
 /// Wrap any widget with a small dark tooltip above it.
+/// Hover label above the control - for the bottom control bar, where there's
+/// room overhead.
 pub fn tipped<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     label: impl ToString,
 ) -> Element<'a, Message> {
+    tipped_at(content, label, iced::widget::tooltip::Position::Top)
+}
+
+/// Hover label below the control. Used by anything in a top row: there's no
+/// space above it, so a top-positioned tooltip gets clamped back over the
+/// button and hides the icon you're pointing at.
+pub fn tipped_below<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    label: impl ToString,
+) -> Element<'a, Message> {
+    tipped_at(content, label, iced::widget::tooltip::Position::Bottom)
+}
+
+fn tipped_at<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    label: impl ToString,
+    position: iced::widget::tooltip::Position,
+) -> Element<'a, Message> {
     tooltip(
         content,
-        container(text(label.to_string()).size(11).color(TEXT_BRIGHT))
+        container(text(label.to_string()).size(11).color(text_bright()))
             .padding([4, 8])
             .style(|_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(BG_DEEPEST)),
+                background: Some(iced::Background::Color(bg_deepest())),
                 border: Border {
                     radius: iced::border::Radius::new(4.0),
                     ..Default::default()
                 },
                 ..Default::default()
             }),
-        iced::widget::tooltip::Position::Top,
+        position,
     )
     .into()
 }
@@ -112,7 +150,22 @@ pub fn tipped<'a, Message: 'a>(
 
 fn glow<'a>(body: &str) -> Svg<'a> {
     // Glow's source SVGs use `fill="black"`. Swap that to our icon colour.
-    let body = body.replace("fill=\"black\"", &format!("fill=\"{ICON_HEX}\""));
+    let body = body.replace("fill=\"black\"", &format!("fill=\"{}\"", icon_hex()));
+    let xml = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>"
+    );
+    svg(svg::Handle::from_memory(xml.into_bytes()))
+        .width(Length::Fixed(ICON_SIZE as f32))
+        .height(Length::Fixed(ICON_SIZE as f32))
+}
+
+/// Lucide-derived icons, which carry their colour as a literal light grey in
+/// `stroke`/`fill` rather than the `fill="black"` placeholder Glow uses.
+/// Same substitution as `glow`, against that literal - without it these
+/// stayed a fixed grey on every theme and all but disappeared on the light
+/// ones.
+fn stroked<'a>(body: &str) -> Svg<'a> {
+    let body = body.replace("#C5CDD9", &icon_hex());
     let xml = format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>"
     );
@@ -187,10 +240,7 @@ pub fn eye_off<'a>() -> Svg<'a> {
 // which means "location"; we want the desk-tack metaphor for "keep on top".
 pub fn pin<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="m9 10.76-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Same shape; active state is communicated by the button background colour.
@@ -201,55 +251,37 @@ pub fn pin_active<'a>() -> Svg<'a> {
 // Audio track picker - Lucide "music" note icon, consistent with captions style.
 pub fn audio_tracks<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 // Subtitle / captions - Glow has no captions-specific icon, so we keep the
 // Lucide-derived one inline. Outline style still reads consistent.
 pub fn captions<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4"/><path d="M15 15h2"/><path d="M7 11h2"/><path d="M13 11h4"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 pub fn captions_off<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="14" x="3" y="5" rx="2" ry="2"/><path d="M7 15h4"/><path d="M15 15h2"/><path d="M7 11h2"/><path d="M13 11h4"/><line x1="2" x2="22" y1="2" y2="22"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 // Window control glyphs (minimize bar / square / X) for the custom title bar.
 pub fn window_minimize<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 pub fn window_maximize<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="5" y="5" rx="1"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// "Fit window to video native size" icon: a small filled rectangle inside
 /// a larger outlined one, representing the video snug inside the window.
 pub fn fit_to_native<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="1.5"/><rect x="7" y="9" width="10" height="6" rx="1" fill="#C5CDD9"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// AB repeat: two bracket-arrows enclosing "AB" text.
@@ -257,117 +289,78 @@ pub fn fit_to_native<'a>() -> Svg<'a> {
 pub fn ab_loop<'a>() -> Svg<'a> {
     // Left arrow-bracket + A + B + right arrow-bracket
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="7,8 4,12 7,16"/><polyline points="17,8 20,12 17,16"/><text x="7.5" y="16" font-size="9" font-family="monospace" font-weight="bold" fill="#C5CDD9" stroke="none">AB</text></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Panel collapse: vertical bar on the left + bold chevron arrow pointing left.
 pub fn help<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Large rect with a small filled rect docked in its bottom-right corner -
 /// Picture-in-Picture toggle.
 pub fn pip<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><rect x="12" y="12" width="7" height="5" rx="1" fill="#C5CDD9"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Left chevron - browser back navigation.
 pub fn nav_back<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 5 8 12 15 19"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Right chevron - browser forward navigation.
 pub fn nav_forward<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 5 16 12 9 19"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Up chevron - go to the parent folder.
 pub fn nav_up<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 15 12 8 19 15"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Monitor/desktop outline - "This PC" drive list.
 pub fn nav_pc<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><line x1="8" y1="20" x2="16" y2="20"/><line x1="12" y1="16" x2="12" y2="20"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Three horizontal lines - main application menu button.
 pub fn hamburger<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Grid / apps icon for the panels menu button.
 pub fn panels_menu<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Box with an arrow pointing out its top-right corner - pop a panel out
 /// into its own window.
 pub fn detach<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 /// Box with an arrow pointing into it - dock a detached panel back into
 /// the main window.
 pub fn dock<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="21 9 21 3 15 3"/><line x1="10" y1="14" x2="21" y2="3"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 pub fn panel_close<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="3" x2="4" y2="21"/><polyline points="19 5 9 12 19 19"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }
 
 pub fn window_close<'a>() -> Svg<'a> {
     let body = r##"<g fill="none" stroke="#C5CDD9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></g>"##;
-    let xml = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">{body}</svg>");
-    svg(svg::Handle::from_memory(xml.into_bytes()))
-        .width(Length::Fixed(ICON_SIZE as f32))
-        .height(Length::Fixed(ICON_SIZE as f32))
+    stroked(body)
 }

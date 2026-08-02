@@ -2,6 +2,7 @@ pub mod app_settings;
 mod browser_panel;
 mod chapter_panel;
 mod controls;
+pub mod theme;
 mod edge_grips;
 mod icons;
 mod playlist_panel;
@@ -16,26 +17,18 @@ use crate::app::use_custom_title_bar;
 use iced::alignment::{Horizontal, Vertical};
 use iced::{
     Border, Color, Element, Length, Padding,
-    widget::{Space, button, column, container, image, mouse_area, pin, row, stack, text, tooltip},
+    widget::{Space, button, column, container, mouse_area, pin, row, stack, text, tooltip},
 };
 
 use crate::app::{Message, MpvNe, PanelKind};
 
-// Darker-than-Nord base palette with aurora (northern lights) accents.
-// Bases trend toward a cool charcoal so the aurora colors pop.
-pub const BG_DEEPEST: Color = Color::from_rgb(0.075, 0.085, 0.110); // window backdrop
-pub const BG_SURFACE: Color = Color::from_rgb(0.105, 0.115, 0.145); // chrome bars
-pub const BG_BUTTON: Color = Color::from_rgb(0.135, 0.150, 0.180);  // idle button
-pub const BG_HOVER: Color = Color::from_rgb(0.180, 0.200, 0.235);   // hovered
-
-pub const TEXT_BRIGHT: Color = Color::from_rgb(0.790, 0.825, 0.870);
-pub const TEXT_MUTED: Color = Color::from_rgb(0.470, 0.520, 0.585);
-
-// Aurora accents. Each toggle picks one so the chrome lights up like the
-// borealis when several are on at once.
-pub const AURORA_GREEN: Color = Color::from_rgb(0.380, 0.860, 0.660);
-pub const AURORA_TEAL: Color = Color::from_rgb(0.320, 0.780, 0.860);
-pub const AURORA_PURPLE: Color = Color::from_rgb(0.700, 0.550, 0.920);
+// The palette lives in `theme` now so it can change at runtime. These were
+// `const Color`s; they're functions returning the active theme's colour,
+// which is why call sites carry parentheses. See theme.rs.
+pub use theme::{
+    accent_green, accent_purple, accent_teal, bg_button, bg_deepest, bg_hover, bg_surface,
+    text_bright, text_muted,
+};
 
 // Width of the docked settings panel in pixels.
 pub const SETTINGS_PANEL_W: f32 = 280.0;
@@ -118,14 +111,14 @@ pub fn fmt_duration(secs: f64) -> String {
 
 /// Styled context-menu row shared by the video right-click menu.
 fn ctx_menu_item<'a>(label: impl ToString, msg: Message) -> Element<'a, Message> {
-    button(text(label.to_string()).size(12).color(TEXT_BRIGHT))
+    button(text(label.to_string()).size(12).color(text_bright()))
         .padding([7, 14])
         .width(Length::Fill)
         .style(|_, status| {
             use iced::widget::button::Status;
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(
-                    if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                    if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_deepest() }
                 )),
                 ..Default::default()
             }
@@ -140,7 +133,7 @@ fn ctx_menu_divider<'a>() -> Element<'a, Message> {
         .width(Length::Fill)
         .height(Length::Fixed(1.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_HOVER)),
+            background: Some(iced::Background::Color(bg_hover())),
             ..Default::default()
         })
         .into()
@@ -154,9 +147,9 @@ fn ctx_menu_header<'a>(label: &'static str, idx: usize, open: bool) -> Element<'
     let arrow = if open { "\u{25BE}" } else { "\u{25B8}" }; // ▾ / ▸
     button(
         row![
-            text(label).size(12).color(TEXT_MUTED),
+            text(label).size(12).color(text_muted()),
             Space::new().width(Length::Fill),
-            text(arrow).size(11).color(TEXT_MUTED),
+            text(arrow).size(11).color(text_muted()),
         ]
         .align_y(iced::Alignment::Center),
     )
@@ -166,7 +159,7 @@ fn ctx_menu_header<'a>(label: &'static str, idx: usize, open: bool) -> Element<'
         use iced::widget::button::Status;
         iced::widget::button::Style {
             background: Some(iced::Background::Color(
-                if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_SURFACE }
+                if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_surface() }
             )),
             ..Default::default()
         }
@@ -347,8 +340,8 @@ pub fn menu_window_view(app: &MpvNe) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
-            border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+            background: Some(iced::Background::Color(bg_deepest())),
+            border: iced::Border { color: crate::ui::theme::border(), width: 1.0, radius: iced::border::Radius::new(6.0) },
             ..Default::default()
         })
         .into()
@@ -366,7 +359,7 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
+            background: Some(iced::Background::Color(bg_deepest())),
             ..Default::default()
         });
 
@@ -379,8 +372,19 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
     let outer = container(inner)
         .width(Length::Fill)
         .height(Length::Fill)
+        // Children paint over the container's own border, so inset them by
+        // the stroke width or the outline is drawn and then covered up.
+        .padding(1)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
+            background: Some(iced::Background::Color(bg_deepest())),
+            // The window's own edge. One outline at the outside beats a box
+            // around every bar - the app reads as a single surface, and the
+            // border colour has somewhere it actually belongs.
+            border: iced::Border {
+                color: crate::ui::theme::border(),
+                width: 1.0,
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -395,8 +399,50 @@ pub fn panel_window_view(app: &MpvNe) -> Element<'_, Message> {
 /// `top_bar::view`'s structure (same logo, height, padding, spacing, button
 /// sizing) instead of inventing its own slimmer bar, so the detached window
 /// reads as part of the same app rather than a bolted-on utility window.
+/// The title area every window's bar uses: the label, clipped, under a
+/// gradient that fades it into the bar on the right.
+///
+/// Shared so the three bars actually match. The main window had this and the
+/// panel and settings windows did not, which is why a long title behaved
+/// differently depending on which window you were looking at.
+pub fn title_region(label: String) -> Element<'static, Message> {
+    let fade_from = Color { a: 0.0, ..bg_surface() };
+    let fade = container(Space::new())
+        .width(Length::Fixed(56.0))
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                    .add_stop(0.0, fade_from)
+                    .add_stop(1.0, bg_surface()),
+            ))),
+            ..Default::default()
+        });
+
+    stack![
+        container(
+            text(label)
+                .size(13)
+                .color(text_bright())
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .padding([0, 8])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_y(Vertical::Center)
+        .clip(true),
+        container(fade)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Horizontal::Right),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 fn panel_title_bar(app: &MpvNe) -> Element<'_, Message> {
-    let logo = image(app.img_icon.clone())
+    let logo = iced::widget::svg(app.img_icon.clone())
         .width(Length::Fixed(22.0))
         .height(Length::Fixed(22.0));
     let logo_btn = container(logo)
@@ -404,29 +450,22 @@ fn panel_title_bar(app: &MpvNe) -> Element<'_, Message> {
         .height(Length::Fill)
         .align_y(Vertical::Center);
 
-    let title_label = text("MPV-NE Panel").size(13).color(TEXT_BRIGHT);
-    let drag_region = mouse_area(
-        container(title_label)
-            .padding([0, 8])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_y(Vertical::Center),
-    )
-    .on_press(Message::PanelDragWindow);
+    let drag_region = mouse_area(title_region("MPV-NE Panel".to_string()))
+        .on_press(Message::PanelDragWindow);
 
-    let dock_btn = icons::tipped(
+    let dock_btn = icons::tipped_below(
         icons::square_btn(icons::dock()).on_press(Message::ReattachPanel),
         "Dock panel back into the main window",
     );
-    let min_btn = icons::tipped(
+    let min_btn = icons::tipped_below(
         icons::square_btn(icons::window_minimize()).on_press(Message::PanelMinimize),
         "Minimize",
     );
-    let max_btn = icons::tipped(
+    let max_btn = icons::tipped_below(
         icons::square_btn(icons::window_maximize()).on_press(Message::PanelToggleMaximize),
         "Maximize",
     );
-    let close_btn = icons::tipped(
+    let close_btn = icons::tipped_below(
         icons::square_btn(icons::window_close()).on_press(Message::ClosePanelWindow),
         "Close panel",
     );
@@ -444,7 +483,7 @@ fn panel_title_bar(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fixed(44.0))
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     })
     .into()
@@ -475,18 +514,18 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
                 text(*label)
                     .size(11)
                     .center()
-                    .color(if is_active { BG_DEEPEST } else { TEXT_MUTED }),
+                    .color(if is_active { bg_deepest() } else { text_muted() }),
             )
             .padding([6, 2])
             .width(Length::Fill)
             .style(move |_t, _status| iced::widget::button::Style {
                 background: Some(iced::Background::Color(if is_active {
-                    AURORA_TEAL
+                    accent_teal()
                 } else {
-                    BG_SURFACE
+                    bg_surface()
                 })),
                 border: Border {
-                    color: BG_DEEPEST,
+                    color: bg_deepest(),
                     width: 1.0,
                     radius: iced::border::Radius::new(0.0),
                 },
@@ -509,12 +548,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         container(r)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_SURFACE)),
-                border: iced::Border {
-                    color: BG_DEEPEST,
-                    width: 0.0,
-                    radius: iced::border::Radius::new(0.0),
-                },
+                background: Some(iced::Background::Color(bg_surface())),
                 ..Default::default()
             })
     };
@@ -527,11 +561,11 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
     let action_row: Element<'_, Message> = if detached {
         Space::new().height(Length::Fixed(0.0)).into()
     } else {
-        let detach_btn = icons::tipped(
+        let detach_btn = icons::tipped_below(
             icons::square_btn(icons::detach()).on_press(Message::DetachPanel),
             "Pop panel out into its own window",
         );
-        let close_btn = icons::tipped(
+        let close_btn = icons::tipped_below(
             icons::square_btn(icons::panel_close()).on_press(Message::TogglePanel(active)),
             "Close panel",
         );
@@ -549,7 +583,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         .width(Length::Fill)
         .height(Length::Fixed(44.0))
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             ..Default::default()
         })
         .into()
@@ -578,8 +612,8 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
 
     let line = |label: &str, value: String| -> Element<'a, Message> {
         row![
-            text(label.to_string()).size(12).color(TEXT_MUTED).width(Length::Fixed(86.0)),
-            text(value).size(12).color(TEXT_BRIGHT),
+            text(label.to_string()).size(12).color(text_muted()).width(Length::Fixed(86.0)),
+            text(value).size(12).color(text_bright()),
         ]
         .into()
     };
@@ -601,7 +635,7 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
     };
 
     let body = column![
-        text("Stats").size(13).color(AURORA_TEAL),
+        text("Stats").size(13).color(accent_teal()),
         line("Resolution", res),
         line("Video", format!("{}  {:.2} Mb/s", vcodec, s.video_bitrate / 1_000_000.0)),
         line("Audio", format!("{} {}ch  {:.0} kb/s", acodec, p.audio_channels, s.audio_bitrate / 1_000.0)),
@@ -618,11 +652,13 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
         .width(Length::Fixed(STATS_W))
         .padding([10, 14])
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.72))),
+            background: Some(iced::Background::Color(Color { a: 0.92, ..bg_surface() })),
             border: Border {
                 radius: iced::border::Radius::new(6.0),
-                ..Default::default()
+                color: crate::ui::theme::border(),
+                width: 1.0,
             },
+            shadow: elevation(14.0, 0.45),
             ..Default::default()
         });
 
@@ -654,6 +690,18 @@ fn stack_stats<'a>(app: &'a MpvNe, base: Element<'a, Message>) -> Element<'a, Me
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+/// Drop shadow for surfaces that float above the rest - dialogs, menus and
+/// overlays. Black rather than a palette slot: a shadow is an absence of
+/// light, so it reads correctly on light and dark themes alike, and tinting
+/// it to a theme colour makes it look like a glow instead.
+fn elevation(blur: f32, alpha: f32) -> iced::Shadow {
+    iced::Shadow {
+        color: Color { a: alpha, ..Color::BLACK },
+        offset: iced::Vector::new(0.0, 2.0),
+        blur_radius: blur,
+    }
 }
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
@@ -689,7 +737,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .padding(8)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.55))),
+                background: Some(iced::Background::Color(Color { a: 0.92, ..bg_surface() })),
                 ..Default::default()
             });
             layers.push(
@@ -752,16 +800,23 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .width(Length::Fixed(SETTINGS_PANEL_W))
                 .height(Length::Fill)
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_DEEPEST)),
-                    border: iced::Border {
-                        color: BG_SURFACE,
-                        width: 1.0,
-                        radius: iced::border::Radius::new(0.0),
-                    },
+                    background: Some(iced::Background::Color(bg_deepest())),
                     ..Default::default()
                 });
 
-            row![player_col, panel]
+            // A dedicated 1px rule rather than a border on the panel: iced
+            // borders draw on all four sides, so the panel's own outline put
+            // a line along the window edge as well as the seam, and the seam
+            // is the only one that means anything here.
+            let seam = container(Space::new())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(iced::Background::Color(crate::ui::theme::border())),
+                    ..Default::default()
+                });
+
+            row![player_col, seam, panel]
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
@@ -773,8 +828,16 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     let outer = container(inner)
         .width(Length::Fill)
         .height(Length::Fill)
+        // Children paint over the container's own border, so inset them by
+        // the stroke width or the outline is drawn and then covered up.
+        .padding(1)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
+            background: Some(iced::Background::Color(bg_deepest())),
+            border: iced::Border {
+                color: crate::ui::theme::border(),
+                width: 1.0,
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -794,7 +857,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         let popup_w = if thumb.is_some() { tw } else { 60.0_f32 };
         let popup_h = if thumb.is_some() { th + 22.0 } else { 26.0_f32 };
 
-        let time_label = text(time_str).size(11).color(TEXT_BRIGHT);
+        let time_label = text(time_str).size(11).color(text_bright());
         let popup_body: Element<'_, Message> = if let Some(handle) = thumb {
             col![
                 img_widget(handle)
@@ -815,12 +878,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         let popup = container(popup_body)
             .width(Length::Shrink)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_DEEPEST)),
+                background: Some(iced::Background::Color(bg_deepest())),
                 border: iced::Border {
-                    color: BG_HOVER,
+                    color: crate::ui::theme::border(),
                     width: 1.0,
                     radius: iced::border::Radius::new(4.0),
                 },
+                shadow: elevation(12.0, 0.45),
                 ..Default::default()
             });
 
@@ -925,25 +989,25 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         let path2 = ctx.path.clone();
         let menu = container(
             column![
-                button(text("Open containing folder").size(12).color(TEXT_BRIGHT))
+                button(text("Open containing folder").size(12).color(text_bright()))
                     .padding([7, 14]).width(Length::Fill)
                     .style(|_, status| {
                         use iced::widget::button::Status;
                         iced::widget::button::Style {
                             background: Some(iced::Background::Color(
-                                if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                                if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_deepest() }
                             )),
                             ..Default::default()
                         }
                     })
                     .on_press(Message::OpenFileLocation(path)),
-                button(text("Copy file path").size(12).color(TEXT_BRIGHT))
+                button(text("Copy file path").size(12).color(text_bright()))
                     .padding([7, 14]).width(Length::Fill)
                     .style(|_, status| {
                         use iced::widget::button::Status;
                         iced::widget::button::Style {
                             background: Some(iced::Background::Color(
-                                if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                                if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_deepest() }
                             )),
                             ..Default::default()
                         }
@@ -954,8 +1018,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
             .width(Length::Fixed(200.0)),
         )
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
-            border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+            background: Some(iced::Background::Color(bg_deepest())),
+            border: iced::Border { color: crate::ui::theme::border(), width: 1.0, radius: iced::border::Radius::new(6.0) },
             ..Default::default()
         });
 
@@ -993,19 +1057,19 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                     .style(|_, status| {
                         use iced::widget::text_input::Status;
                         iced::widget::text_input::Style {
-                            background: iced::Background::Color(BG_DEEPEST),
+                            background: iced::Background::Color(bg_deepest()),
                             border: iced::Border {
                                 color: match status {
-                                    Status::Focused { .. } => AURORA_TEAL,
-                                    _ => BG_HOVER,
+                                    Status::Focused { .. } => accent_teal(),
+                                    _ => bg_hover(),
                                 },
                                 width: 1.5,
                                 radius: iced::border::Radius::new(4.0),
                             },
-                            icon: TEXT_MUTED,
-                            placeholder: TEXT_MUTED,
-                            value: TEXT_BRIGHT,
-                            selection: Color { a: 0.3, ..AURORA_TEAL },
+                            icon: text_muted(),
+                            placeholder: text_muted(),
+                            value: text_bright(),
+                            selection: Color { a: 0.3, ..accent_teal() },
                         }
                     }),
         )
@@ -1016,10 +1080,10 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 row![
                     text(if modal.download_mode { "\u{2611}" } else { "\u{2610}" })
                         .size(13)
-                        .color(if modal.download_mode { AURORA_TEAL } else { TEXT_MUTED }),
+                        .color(if modal.download_mode { accent_teal() } else { text_muted() }),
                     text("Fetch via yt-dlp download (for sites that block direct streaming)")
                         .size(10)
-                        .color(TEXT_MUTED),
+                        .color(text_muted()),
                 ]
                 .spacing(6)
                 .align_y(iced::Alignment::Center),
@@ -1032,32 +1096,32 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let dialog = container(
             column![
-                text(modal.title).size(14).color(TEXT_BRIGHT),
-                text(modal.prompt).size(11).color(TEXT_MUTED),
+                text(modal.title).size(14).color(text_bright()),
+                text(modal.prompt).size(11).color(text_muted()),
                 input,
                 download_toggle,
                 row![
                     Space::new().width(Length::Fill),
-                    button(text("Cancel").size(12).color(TEXT_MUTED))
+                    button(text("Cancel").size(12).color(text_muted()))
                         .padding([5, 14])
                         .style(|_, status| {
                             use iced::widget::button::Status;
                             iced::widget::button::Style {
                                 background: Some(iced::Background::Color(
-                                    if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_BUTTON }
+                                    if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_button() }
                                 )),
                                 border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                                 ..Default::default()
                             }
                         })
                         .on_press(Message::ModalCancel),
-                    button(text("OK").size(12).color(BG_DEEPEST))
+                    button(text("OK").size(12).color(bg_deepest()))
                         .padding([5, 18])
                         .style(|_, status| {
                             use iced::widget::button::Status;
                             iced::widget::button::Style {
                                 background: Some(iced::Background::Color(
-                                    if matches!(status, Status::Hovered | Status::Pressed) { AURORA_GREEN } else { AURORA_TEAL }
+                                    if matches!(status, Status::Hovered | Status::Pressed) { accent_green() } else { accent_teal() }
                                 )),
                                 border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                                 ..Default::default()
@@ -1073,12 +1137,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         )
         .padding(20)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
-                color: BG_HOVER,
+                color: crate::ui::theme::border(),
                 width: 1.0,
                 radius: iced::border::Radius::new(8.0),
             },
+            shadow: elevation(20.0, 0.5),
             ..Default::default()
         });
 
@@ -1101,14 +1166,14 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         // that silently pasted with no visible response was easy to miss
         // existed at all, so this makes the affordance explicit.
         let paste_menu: Element<'_, Message> = if let Some((mx, my)) = app.modal_paste_menu {
-            let item = button(text("Paste").size(12).color(TEXT_BRIGHT))
+            let item = button(text("Paste").size(12).color(text_bright()))
                 .padding([7, 16])
                 .width(Length::Fixed(110.0))
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(
-                            if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                            if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_deepest() }
                         )),
                         ..Default::default()
                     }
@@ -1116,8 +1181,8 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .on_press(Message::ModalPasteRequest);
             let menu = container(item)
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_DEEPEST)),
-                    border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(6.0) },
+                    background: Some(iced::Background::Color(bg_deepest())),
+                    border: iced::Border { color: crate::ui::theme::border(), width: 1.0, radius: iced::border::Radius::new(6.0) },
                     ..Default::default()
                 });
             let px = mx.clamp(4.0, (app.window_w_logical - 114.0).max(4.0));
@@ -1153,18 +1218,18 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let tip_style = |_: &iced::Theme, status: iced::widget::text_input::Status| {
             iced::widget::text_input::Style {
-                background: iced::Background::Color(BG_DEEPEST),
+                background: iced::Background::Color(bg_deepest()),
                 border: iced::Border {
                     color: match status {
-                        iced::widget::text_input::Status::Focused { .. } => AURORA_TEAL,
-                        _ => BG_HOVER,
+                        iced::widget::text_input::Status::Focused { .. } => accent_teal(),
+                        _ => bg_hover(),
                     },
                     width: 1.5,
                     radius: iced::border::Radius::new(4.0),
                 },
-                icon: TEXT_MUTED, placeholder: TEXT_MUTED,
-                value: TEXT_BRIGHT,
-                selection: iced::Color { a: 0.3, ..AURORA_TEAL },
+                icon: text_muted(), placeholder: text_muted(),
+                value: text_bright(),
+                selection: iced::Color { a: 0.3, ..accent_teal() },
             }
         };
 
@@ -1176,13 +1241,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 .size(13)
                 .style(tip_style)
                 .width(Length::Fill),
-            button(text(if app.sub_search_loading { "…" } else { "Search" }).size(12).color(BG_DEEPEST))
+            button(text(if app.sub_search_loading { "…" } else { "Search" }).size(12).color(bg_deepest()))
                 .padding([8, 14])
                 .style(|_, status| {
                     use iced::widget::button::Status;
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(
-                            if matches!(status, Status::Hovered | Status::Pressed) { AURORA_GREEN } else { AURORA_TEAL }
+                            if matches!(status, Status::Hovered | Status::Pressed) { accent_green() } else { accent_teal() }
                         )),
                         border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                         ..Default::default()
@@ -1193,10 +1258,10 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let results: Element<'_, Message> = if app.sub_search_results.is_empty() {
             if app.sub_search_loading {
-                container(text("Searching…").size(12).color(TEXT_MUTED))
+                container(text("Searching…").size(12).color(text_muted()))
                     .padding([12, 0]).into()
             } else {
-                container(text("Enter a title and press Search").size(12).color(TEXT_MUTED))
+                container(text("Enter a title and press Search").size(12).color(text_muted()))
                     .padding([12, 0]).into()
             }
         } else {
@@ -1205,10 +1270,10 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                 button(
                     row![
                         column![
-                            text(label).size(12).color(TEXT_BRIGHT),
+                            text(label).size(12).color(text_bright()),
                             text(format!("{} • ★{:.1} • {} downloads",
                                 r.language.to_uppercase(), r.rating, r.downloads))
-                                .size(10).color(TEXT_MUTED),
+                                .size(10).color(text_muted()),
                         ].spacing(2),
                     ]
                 )
@@ -1218,7 +1283,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
                     use iced::widget::button::Status;
                     iced::widget::button::Style {
                         background: Some(iced::Background::Color(
-                            if matches!(status, Status::Hovered | Status::Pressed) { BG_HOVER } else { BG_DEEPEST }
+                            if matches!(status, Status::Hovered | Status::Pressed) { bg_hover() } else { bg_deepest() }
                         )),
                         border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                         ..Default::default()
@@ -1235,10 +1300,10 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let dialog = container(
             column![
-                text("Search OpenSubtitles").size(14).color(TEXT_BRIGHT),
+                text("Search OpenSubtitles").size(14).color(text_bright()),
                 search_bar,
                 results,
-                container(text("Click a result to download and load").size(10).color(TEXT_MUTED))
+                container(text("Click a result to download and load").size(10).color(text_muted()))
                     .padding([4, 0]),
             ]
             .spacing(10)
@@ -1246,8 +1311,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         )
         .padding(20)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
-            border: iced::Border { color: BG_HOVER, width: 1.0, radius: iced::border::Radius::new(8.0) },
+            background: Some(iced::Background::Color(bg_surface())),
+            border: iced::Border { color: crate::ui::theme::border(), width: 1.0, radius: iced::border::Radius::new(8.0) },
+            shadow: elevation(20.0, 0.5),
             ..Default::default()
         });
 
@@ -1294,9 +1360,9 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let rows = SHORTCUTS.iter().map(|(key, desc)| {
             row![
-                container(text(*key).size(11).color(AURORA_TEAL))
+                container(text(*key).size(11).color(accent_teal()))
                     .width(Length::Fixed(150.0)),
-                text(*desc).size(11).color(TEXT_BRIGHT),
+                text(*desc).size(11).color(text_bright()),
             ]
             .spacing(8)
             .into()
@@ -1304,22 +1370,23 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
         let content = container(
             column![
-                text("Keyboard shortcuts").size(14).color(TEXT_BRIGHT),
+                text("Keyboard shortcuts").size(14).color(text_bright()),
                 iced::widget::Space::new().height(Length::Fixed(8.0)),
                 column(rows).spacing(6),
                 iced::widget::Space::new().height(Length::Fixed(12.0)),
-                text("Press ? or Escape to close").size(10).color(TEXT_MUTED),
+                text("Press ? or Escape to close").size(10).color(text_muted()),
             ]
             .width(Length::Fixed(360.0)),
         )
         .padding(24)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             border: iced::Border {
-                color: BG_HOVER,
+                color: crate::ui::theme::border(),
                 width: 1.0,
                 radius: iced::border::Radius::new(8.0),
             },
+            shadow: elevation(20.0, 0.5),
             ..Default::default()
         });
 

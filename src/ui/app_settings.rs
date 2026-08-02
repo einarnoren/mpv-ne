@@ -6,12 +6,12 @@
 use iced::alignment::Vertical;
 use iced::{
     Color, Element, Length,
-    widget::{Space, button, column, container, image, mouse_area, row, scrollable, text},
+    widget::{Space, button, column, container, mouse_area, row, scrollable, text},
 };
 
 use super::edge_grips::EdgeGrips;
 use super::icons;
-use super::{AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_BUTTON, BG_DEEPEST, BG_HOVER, BG_SURFACE, TEXT_BRIGHT, TEXT_MUTED};
+use super::{accent_green, accent_purple, accent_teal, bg_button, bg_deepest, bg_hover, bg_surface, text_bright, text_muted};
 use crate::app::{AppSettingsCategory, Message, MpvNe, KEY_SLOTS};
 
 /// Everything this window's content reads, copied out of `MpvNe` so it can
@@ -38,6 +38,12 @@ struct AppSettingsSnapshot {
     minimize_to_tray: bool,
     auto_retry_download: bool,
     gl_render: bool,
+    theme: crate::ui::theme::Theme,
+    custom_colors: Vec<String>,
+    custom_picker: Option<usize>,
+    custom_import: Option<String>,
+    /// HSL of the slot being edited, as bits so the snapshot stays hashable.
+    custom_hsl: (u32, u32, u32),
     /// Resolved key per `KEY_SLOTS` entry, in the same order - `None` means
     /// that slot is explicitly unbound.
     keybind_keys: Vec<Option<String>>,
@@ -69,6 +75,15 @@ impl AppSettingsSnapshot {
             minimize_to_tray: app.minimize_to_tray,
             auto_retry_download: app.auto_retry_download,
             gl_render: app.gl_render,
+            theme: app.theme,
+            custom_colors: app.custom_colors.clone(),
+            custom_picker: app.custom_picker,
+            custom_import: app.custom_import.clone(),
+            custom_hsl: (
+                app.custom_hsl.0.to_bits(),
+                app.custom_hsl.1.to_bits(),
+                app.custom_hsl.2.to_bits(),
+            ),
             keybind_keys: KEY_SLOTS.iter()
                 .map(|(id, ..)| app.resolved_key_for_slot(id))
                 .collect(),
@@ -92,11 +107,30 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         body.into()
     };
 
+    // Always wrapped, never conditionally: adding or removing a node above
+    // the scrollable invalidates its state and snaps it back to the top.
+    // Only the message it emits varies.
+    let dismiss = if app.custom_picker.is_some() {
+        Message::CloseColorPicker
+    } else {
+        Message::Noop
+    };
+    let inner: Element<'_, Message> =
+        iced::widget::mouse_area(inner).on_press(dismiss).into();
+
     let outer = container(inner)
         .width(Length::Fill)
         .height(Length::Fill)
+        // Children paint over the container's own border, so inset them by
+        // the stroke width or the outline is drawn and then covered up.
+        .padding(1)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
+            background: Some(iced::Background::Color(bg_deepest())),
+            border: iced::Border {
+                color: crate::ui::theme::border(),
+                width: 1.0,
+                ..Default::default()
+            },
             ..Default::default()
         });
 
@@ -109,7 +143,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 /// window reads as part of the same app rather than a bolted-on dialog. No
 /// dock button - this window is never dockable.
 fn title_bar(app: &MpvNe) -> Element<'_, Message> {
-    let logo = image(app.img_icon.clone())
+    let logo = iced::widget::svg(app.img_icon.clone())
         .width(Length::Fixed(22.0))
         .height(Length::Fixed(22.0));
     let logo_btn = container(logo)
@@ -117,25 +151,18 @@ fn title_bar(app: &MpvNe) -> Element<'_, Message> {
         .height(Length::Fill)
         .align_y(Vertical::Center);
 
-    let title_label = text("Settings").size(13).color(TEXT_BRIGHT);
-    let drag_region = mouse_area(
-        container(title_label)
-            .padding([0, 8])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_y(Vertical::Center),
-    )
-    .on_press(Message::AppSettingsDragWindow);
+    let drag_region = mouse_area(super::title_region("Settings".to_string()))
+        .on_press(Message::AppSettingsDragWindow);
 
-    let min_btn = icons::tipped(
+    let min_btn = icons::tipped_below(
         icons::square_btn(icons::window_minimize()).on_press(Message::AppSettingsMinimize),
         "Minimize",
     );
-    let max_btn = icons::tipped(
+    let max_btn = icons::tipped_below(
         icons::square_btn(icons::window_maximize()).on_press(Message::AppSettingsToggleMaximize),
         "Maximize",
     );
-    let close_btn = icons::tipped(
+    let close_btn = icons::tipped_below(
         icons::square_btn(icons::window_close()).on_press(Message::CloseAppSettingsWindow),
         "Close",
     );
@@ -153,7 +180,7 @@ fn title_bar(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fixed(44.0))
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     })
     .into()
@@ -170,11 +197,11 @@ fn nav(app: &MpvNe) -> Element<'_, Message> {
         .iter()
         .map(|(label, cat)| {
             let active = app.app_settings_category == *cat;
-            let btn = container(text(*label).size(13).color(if active { AURORA_TEAL } else { TEXT_BRIGHT }))
+            let btn = container(text(*label).size(13).color(if active { accent_teal() } else { text_bright() }))
                 .padding([8, 14])
                 .width(Length::Fill)
                 .style(move |_| container::Style {
-                    background: Some(iced::Background::Color(if active { BG_HOVER } else { Color::TRANSPARENT })),
+                    background: Some(iced::Background::Color(if active { bg_hover() } else { Color::TRANSPARENT })),
                     border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                     ..Default::default()
                 });
@@ -186,7 +213,7 @@ fn nav(app: &MpvNe) -> Element<'_, Message> {
         .width(Length::Fixed(160.0))
         .height(Length::Fill)
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_SURFACE)),
+            background: Some(iced::Background::Color(bg_surface())),
             ..Default::default()
         })
         .into()
@@ -247,32 +274,431 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
     .width(Length::Fill);
 
     column![
-        text("Interface").size(16).color(TEXT_BRIGHT),
+        text("Interface").size(16).color(text_bright()),
         text("General app behavior - playback-specific settings live in the side panel's Settings tab.")
             .size(12)
-            .color(TEXT_MUTED),
+            .color(text_muted()),
         gap(),
         container(rows)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_SURFACE)),
+                background: Some(iced::Background::Color(bg_surface())),
                 border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
                 ..Default::default()
             }),
         gap(),
         settings_section(
+            "Theme",
+            "Colour scheme for the whole app - applies immediately",
+            theme_picker(app),
+        ),
+        gap(),
+        settings_section(
             "Restart",
             "Some settings (like GPU video rendering) only take effect after a restart - this reopens the app where you left off",
-            action_btn("Restart now", Message::RestartApp, AURORA_GREEN),
+            action_btn("Restart now", Message::RestartApp, accent_green()),
         ),
         gap(),
         settings_section(
             "File associations",
             "Register MPV-NE as an option in \"Open with\", then pick it as default in the Windows settings that open",
-            action_btn("Register file associations", Message::RegisterFileAssociations, AURORA_TEAL),
+            action_btn("Register file associations", Message::RegisterFileAssociations, accent_teal()),
         ),
     ]
     .spacing(0)
+    .into()
+}
+
+/// Row of theme buttons, active one highlighted. Small enough a list makes
+/// more sense than a dropdown, and it lets each name stay readable.
+fn theme_picker(app: &AppSettingsSnapshot) -> Element<'static, Message> {
+    use crate::ui::theme::Theme;
+    let (active, custom, open, hsl) =
+        (app.theme, &app.custom_colors, app.custom_picker, app.custom_hsl);
+    let btn = |t: Theme| {
+        let is_active = t == active;
+        let base = if is_active { accent_green() } else { text_muted() };
+        button(text(t.label()).size(11))
+            .padding([4, 10])
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let bg = match status {
+                    Status::Hovered | Status::Pressed => bg_hover(),
+                    _ => if is_active { bg_hover() } else { bg_button() },
+                };
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    text_color: legible(base, bg),
+                    border: iced::Border {
+                        color: if is_active { Color { a: 0.4, ..accent_green() } } else { Color::TRANSPARENT },
+                        width: if is_active { 1.0 } else { 0.0 },
+                        radius: iced::border::Radius::new(4.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::SetTheme(t))
+    };
+    let picker = row(Theme::ALL.iter().map(|t| btn(*t).into()))
+        .spacing(4)
+        .wrap();
+
+    // The colour editor only appears for the Custom theme - it'd just be
+    // noise while a built-in one is selected.
+    if active != Theme::Custom {
+        return picker.into();
+    }
+
+    let label_c = crate::ui::theme::ensure_contrast(text_muted(), bg_surface(), 4.5);
+
+    // One editable colour: label, swatch (which opens the picker) and hex.
+    let field = |idx: usize| -> Element<'static, Message> {
+        let value = custom.get(idx).cloned().unwrap_or_default();
+        let swatch = container(Space::new().width(Length::Fixed(18.0)).height(Length::Fixed(18.0)))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(
+                    crate::ui::theme::custom_slot(idx),
+                )),
+                border: iced::Border {
+                    color: text_muted(),
+                    width: 1.0,
+                    radius: iced::border::Radius::new(3.0),
+                },
+                ..Default::default()
+            });
+        // The swatch doubles as the picker toggle - typing hex stays
+        // available for anyone who knows the value they want.
+        let swatch = button(swatch)
+            .padding(0)
+            .style(|_, _| iced::widget::button::Style::default())
+            .on_press(Message::ToggleColorPicker(idx));
+
+        let head = row![
+            text(crate::ui::theme::slot_label(idx))
+                .size(11)
+                .color(label_c)
+                .width(Length::Fixed(96.0)),
+            swatch,
+            iced::widget::text_input("#RRGGBB", &value)
+                .on_input(move |s| Message::SetCustomColor(idx, s))
+                .size(11)
+                .padding([3, 6])
+                .width(Length::Fixed(96.0)),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center);
+
+        if open != Some(idx) {
+            return head.into();
+        }
+        column![head, swatch_grid(idx, hsl)].spacing(6).into()
+    };
+
+    // Grouped as plain sections, all visible at once - collapsing them hid
+    // colours that are usually chosen in relation to each other.
+    let groups = crate::ui::theme::CUSTOM_GROUPS.iter().map(|(name, slots)| {
+        let rows = slots.iter().map(|i| field(*i));
+        column![
+            text(*name).size(10).color(accent_green()),
+            column(rows).spacing(4),
+        ]
+        .spacing(4)
+        .into()
+    });
+
+    // Palette as one line: copy it out to keep, paste one back to restore.
+    // Also the quickest undo there is after a run of bad edits.
+    let import_value = app
+        .custom_import
+        .clone()
+        .unwrap_or_else(crate::ui::theme::export_custom);
+    let import = column![
+        text("Palette - copy to save, paste to load").size(10).color(label_c),
+        row![
+            iced::widget::text_input("", &import_value)
+                .on_input(Message::ImportCustomPalette)
+                .size(10)
+                .padding([3, 6])
+                .width(Length::Fill),
+            small_btn("Reset all", Message::ResetAllCustomColors),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    ]
+    .spacing(4);
+
+    column![picker, preview_strip(), column(groups).spacing(10), import]
+        .spacing(10)
+        .into()
+}
+
+fn small_btn(label: &'static str, msg: Message) -> iced::widget::Button<'static, Message> {
+    button(text(label).size(10))
+    .padding([3, 8])
+    .style(|_, status| {
+        use iced::widget::button::Status;
+        let bg = if matches!(status, Status::Hovered | Status::Pressed) {
+            bg_hover()
+        } else {
+            bg_button()
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: legible(text_muted(), bg),
+            border: iced::Border {
+                radius: iced::border::Radius::new(3.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    })
+    .on_press(msg)
+}
+
+/// A miniature of the app drawn in the colours being edited, so their effect
+/// is visible without going and finding the real thing.
+fn preview_strip() -> Element<'static, Message> {
+    use crate::ui::theme as th;
+    let chip = |c: Color, w: f32| {
+        container(Space::new().width(Length::Fixed(w)).height(Length::Fixed(12.0)))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(c)),
+                border: iced::Border {
+                    radius: iced::border::Radius::new(2.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+    };
+    // Stands in for a control: button fill, hover fill, and an icon on each.
+    let fake_btn = |fill: Color| {
+        container(chip(th::icon(), 10.0))
+            .padding(5)
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(fill)),
+                border: iced::Border {
+                    radius: iced::border::Radius::new(3.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+    };
+
+    let bar = container(
+        row![
+            chip(th::accent_green(), 12.0),
+            text("MPV-NE").size(10).color(th::text_bright()),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([4, 8])
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(th::bg_surface())),
+        border: iced::Border {
+            color: th::border(),
+            width: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+
+    let body = container(
+        column![
+            row![fake_btn(th::bg_button()), fake_btn(th::bg_hover())].spacing(5),
+            text("Body text").size(10).color(th::text_bright()),
+            text("Muted text").size(9).color(th::text_muted()),
+            row![
+                chip(th::accent_green(), 26.0),
+                chip(th::accent_teal(), 26.0),
+                chip(th::accent_purple(), 26.0),
+            ]
+            .spacing(4),
+        ]
+        .spacing(5),
+    )
+    .padding(8)
+    .width(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(th::bg_deepest())),
+        ..Default::default()
+    });
+
+    container(column![bar, body])
+        .width(Length::Fixed(230.0))
+        .style(|_| container::Style {
+            border: iced::Border {
+                color: th::border(),
+                width: 1.0,
+                radius: iced::border::Radius::new(5.0),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Clickable colours for one slot: the built-in themes' take on it first,
+/// then a general palette.
+fn swatch_grid(idx: usize, hsl: (u32, u32, u32)) -> Element<'static, Message> {
+    let cell = move |c: Color| {
+        button(Space::new().width(Length::Fixed(20.0)).height(Length::Fixed(20.0)))
+            .padding(0)
+            .style(move |_, status| {
+                use iced::widget::button::Status;
+                let hot = matches!(status, Status::Hovered | Status::Pressed);
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(c)),
+                    border: iced::Border {
+                        color: if hot { text_bright() } else { Color { a: 0.35, ..text_muted() } },
+                        width: if hot { 2.0 } else { 1.0 },
+                        radius: iced::border::Radius::new(3.0),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press(Message::SetCustomColor(idx, crate::ui::theme::to_hex(c)))
+            .into()
+    };
+
+    let from_themes = row(crate::ui::theme::theme_swatches(idx).into_iter().map(cell))
+        .spacing(4)
+        .wrap();
+    let general = row(crate::ui::theme::SWATCHES
+        .iter()
+        .map(|p| cell(crate::ui::theme::swatch_color(*p))))
+        .spacing(4)
+        .width(Length::Fixed(200.0))
+        .wrap();
+
+    // Everything in this panel is drawn on bg_deepest, which the user may
+    // have just set to anything at all. Force these to stay readable.
+    let on_panel = |c: Color| crate::ui::theme::ensure_contrast(c, bg_deepest(), 4.5);
+    let label_c = on_panel(text_muted());
+
+    let (h, sat, light) = (
+        f32::from_bits(hsl.0),
+        f32::from_bits(hsl.1),
+        f32::from_bits(hsl.2),
+    );
+
+    // Hue gets a rainbow rail so the slider shows what it selects; the other
+    // two ramp from the current colour's grey to its full-strength form.
+    let rainbow = {
+        let mut g = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2));
+        for i in 0..=6 {
+            let t = i as f32 / 6.0;
+            g = g.add_stop(t, crate::ui::theme::from_hsl(t * 360.0, 1.0, 0.5));
+        }
+        iced::Background::Gradient(iced::Gradient::Linear(g))
+    };
+    let ramp = |from: Color, to: Color| {
+        let g = iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+            .add_stop(0.0, from)
+            .add_stop(1.0, to);
+        iced::Background::Gradient(iced::Gradient::Linear(g))
+    };
+
+    let axis = move |label: &'static str, value: f32, max: f32, axis: u8, fill: iced::Background| {
+        let handle_c = crate::ui::theme::from_hsl(h, sat, light);
+        row![
+            text(label).size(10).color(label_c).width(Length::Fixed(20.0)),
+            iced::widget::slider(0.0..=max, value, move |v| Message::SetCustomHsl(axis, v))
+                .step(if max > 10.0 { 1.0 } else { 0.01 })
+                .width(Length::Fixed(150.0))
+                .style(move |_, _| {
+                    use iced::widget::slider::{Handle, HandleShape, Rail, Style};
+                    Style {
+                        rail: Rail {
+                            backgrounds: (fill.clone(), fill.clone()),
+                            width: 6.0,
+                            border: iced::Border {
+                                radius: iced::border::Radius::new(3.0),
+                                color: Color { a: 0.35, ..text_muted() },
+                                width: 1.0,
+                            },
+                        },
+                        handle: Handle {
+                            shape: HandleShape::Circle { radius: 6.0 },
+                            background: iced::Background::Color(handle_c),
+                            border_width: 2.0,
+                            border_color: text_bright(),
+                        },
+                    }
+                }),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+    };
+
+    let sliders = column![
+        axis("H", h, 360.0, 0, rainbow),
+        axis("S", sat, 1.0, 1, ramp(
+            crate::ui::theme::from_hsl(h, 0.0, light),
+            crate::ui::theme::from_hsl(h, 1.0, light),
+        )),
+        axis("L", light, 1.0, 2, ramp(Color::BLACK, Color::WHITE)),
+    ]
+    .spacing(4);
+
+    // Informational only - the worst pairing this slot lands in. No
+    // threshold and no warning; it's there if you want it.
+    let note: Element<'static, Message> =
+        match crate::ui::theme::custom_contrast_worst(idx) {
+            Some(ratio) => text(format!("contrast {ratio:.1}:1"))
+                .size(10)
+                .color(label_c)
+                .into(),
+            None => Space::new().into(),
+        };
+
+    let reset = button(text("Reset").size(10).color(on_panel(text_muted())))
+        .padding([2, 8])
+        .style(|_, status| {
+            use iced::widget::button::Status;
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(
+                    if matches!(status, Status::Hovered | Status::Pressed) {
+                        bg_hover()
+                    } else {
+                        bg_button()
+                    },
+                )),
+                border: iced::Border {
+                    radius: iced::border::Radius::new(3.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .on_press(Message::ResetCustomColor(idx));
+
+    let inner = iced::widget::mouse_area(
+        column![
+            sliders,
+            row![note, Space::new().width(Length::Fill), reset]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            text("From themes").size(10).color(label_c),
+            from_themes,
+            text("Palette").size(10).color(label_c),
+            general,
+        ]
+        .spacing(5),
+    )
+    .on_press(Message::Noop);
+
+    container(inner)
+    .padding(8)
+    .style(|_| container::Style {
+        background: Some(iced::Background::Color(bg_deepest())),
+        border: iced::Border {
+            color: Color { a: 0.5, ..text_muted() },
+            width: 1.0,
+            radius: iced::border::Radius::new(5.0),
+        },
+        ..Default::default()
+    })
     .into()
 }
 
@@ -286,8 +712,8 @@ fn gap<'a>() -> Element<'a, Message> {
 fn settings_section(label: &'static str, subtext: &'static str, content: Element<'static, Message>) -> Element<'static, Message> {
     container(
         column![
-            text(label).size(12).color(TEXT_BRIGHT),
-            text(subtext).size(10).color(TEXT_MUTED),
+            text(label).size(12).color(text_bright()),
+            text(subtext).size(10).color(text_muted()),
             content,
         ]
         .spacing(8),
@@ -295,7 +721,7 @@ fn settings_section(label: &'static str, subtext: &'static str, content: Element
     .padding([12, 14])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
         ..Default::default()
     })
@@ -310,13 +736,13 @@ fn settings_section(label: &'static str, subtext: &'static str, content: Element
 fn toggle_row(label: &'static str, note: Option<&'static str>, active: bool, msg: Message) -> Element<'static, Message> {
     let label_col: Element<'static, Message> = if let Some(note) = note {
         column![
-            text(label).size(12).color(TEXT_BRIGHT),
-            text(note).size(10).color(TEXT_MUTED),
+            text(label).size(12).color(text_bright()),
+            text(note).size(10).color(text_muted()),
         ]
         .spacing(2)
         .into()
     } else {
-        text(label).size(12).color(TEXT_BRIGHT).into()
+        text(label).size(12).color(text_bright()).into()
     };
 
     // Give the label/description column the flexible width and a small gap
@@ -334,7 +760,7 @@ fn toggle_row(label: &'static str, note: Option<&'static str>, active: bool, msg
         .padding([9, 14])
         .width(Length::Fill)
         .style(|_| container::Style {
-            border: iced::Border { color: BG_DEEPEST, width: 1.0, radius: iced::border::Radius::new(0.0) },
+            border: iced::Border { color: bg_deepest(), width: 1.0, radius: iced::border::Radius::new(0.0) },
             ..Default::default()
         })
         .into()
@@ -343,21 +769,21 @@ fn toggle_row(label: &'static str, note: Option<&'static str>, active: bool, msg
 /// Compact On/Off text button - same idea as the side panel's toggle
 /// buttons, just tighter padding to suit a dense settings list.
 fn onoff_btn(active: bool, msg: Message) -> Element<'static, Message> {
-    let text_color = if active { AURORA_GREEN } else { TEXT_MUTED };
-    button(text(if active { "On" } else { "Off" }).size(11).color(text_color))
+    let base = if active { accent_green() } else { text_muted() };
+    button(text(if active { "On" } else { "Off" }).size(11))
         .padding([4, 10])
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => if active { BG_HOVER } else { BG_BUTTON },
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => if active { bg_hover() } else { bg_button() },
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color,
+                text_color: legible(base, bg),
                 border: iced::Border {
                     radius: iced::border::Radius::new(4.0),
-                    color: if active { AURORA_GREEN } else { Color::TRANSPARENT },
+                    color: if active { accent_green() } else { Color::TRANSPARENT },
                     width: if active { 1.0 } else { 0.0 },
                 },
                 ..Default::default()
@@ -367,18 +793,27 @@ fn onoff_btn(active: bool, msg: Message) -> Element<'static, Message> {
         .into()
 }
 
+/// A label colour guaranteed to read against the fill behind it. Accents are
+/// free-form under a custom theme, so an accent-on-button-fill label can end
+/// up drawn in exactly the fill's own colour and disappear.
+fn legible(fg: Color, bg: Color) -> Color {
+    crate::ui::theme::ensure_contrast(fg, bg, 4.5)
+}
+
 fn action_btn<'a>(label: &'static str, msg: Message, color: Color) -> Element<'a, Message> {
-    button(text(label).size(11).color(color))
+    // No explicit colour on the text: the button's `text_color` is inherited
+    // and recomputed per status, so the label follows the hover fill too.
+    button(text(label).size(11))
         .padding([4, 10])
         .style(move |_, status| {
             use iced::widget::button::Status;
             let bg = match status {
-                Status::Hovered | Status::Pressed => BG_HOVER,
-                _ => BG_BUTTON,
+                Status::Hovered | Status::Pressed => bg_hover(),
+                _ => bg_button(),
             };
             iced::widget::button::Style {
                 background: Some(iced::Background::Color(bg)),
-                text_color: color,
+                text_color: legible(color, bg),
                 border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                 ..Default::default()
             }
@@ -396,10 +831,10 @@ fn keyboard_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
     });
 
     let header = row![
-        text("Keyboard").size(16).color(TEXT_BRIGHT),
+        text("Keyboard").size(16).color(text_bright()),
         Space::new().width(Length::Fill),
         if any_overridden {
-            action_btn("Reset all", Message::ResetAllKeybindings, AURORA_PURPLE)
+            action_btn("Reset all", Message::ResetAllKeybindings, accent_purple())
         } else {
             Space::new().into()
         },
@@ -411,7 +846,7 @@ fn keyboard_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         header,
         text("Click Rebind, then press the new key. Press Escape to cancel.")
             .size(12)
-            .color(TEXT_MUTED),
+            .color(text_muted()),
         scrollable(column(rows).spacing(4).width(Length::Fill))
             .height(Length::Fill),
     ]
@@ -432,35 +867,35 @@ fn keybind_row(
     let overridden = key.as_deref() != Some(default_key);
 
     let key_display: Element<'static, Message> = if capturing {
-        text("Press a key…").size(12).color(AURORA_TEAL).into()
+        text("Press a key…").size(12).color(accent_teal()).into()
     } else {
         match key {
-            Some(k) => container(text(display_key(&k)).size(11).color(TEXT_BRIGHT))
+            Some(k) => container(text(display_key(&k)).size(11).color(text_bright()))
                 .padding([3, 8])
                 .style(|_| container::Style {
-                    background: Some(iced::Background::Color(BG_BUTTON)),
+                    background: Some(iced::Background::Color(bg_button())),
                     border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
                     ..Default::default()
                 })
                 .into(),
-            None => text("Unbound").size(11).color(TEXT_MUTED).into(),
+            None => text("Unbound").size(11).color(text_muted()).into(),
         }
     };
 
     let rebind_btn = action_btn(
         if capturing { "Cancel" } else { "Rebind" },
         if capturing { Message::CancelRebind } else { Message::StartRebind(slot_id) },
-        if capturing { AURORA_PURPLE } else { AURORA_TEAL },
+        if capturing { accent_purple() } else { accent_teal() },
     );
 
     let mut controls = row![key_display, rebind_btn].spacing(8).align_y(iced::Alignment::Center);
     if overridden && !capturing {
-        controls = controls.push(action_btn("Reset", Message::ResetRebind(slot_id), TEXT_MUTED));
+        controls = controls.push(action_btn("Reset", Message::ResetRebind(slot_id), text_muted()));
     }
 
     container(
         row![
-            text(label).size(12).color(TEXT_BRIGHT),
+            text(label).size(12).color(text_bright()),
             Space::new().width(Length::Fill),
             controls,
         ]
@@ -470,7 +905,7 @@ fn keybind_row(
     .padding([8, 12])
     .width(Length::Fill)
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         border: iced::Border { radius: iced::border::Radius::new(4.0), ..Default::default() },
         ..Default::default()
     })
@@ -505,7 +940,7 @@ fn mouse_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
 
         container(
             row![
-                text(label).size(12).color(TEXT_BRIGHT),
+                text(label).size(12).color(text_bright()),
                 Space::new().width(Length::Fill),
                 picker,
             ]
@@ -515,7 +950,7 @@ fn mouse_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         .padding([9, 14])
         .width(Length::Fill)
         .style(|_| container::Style {
-            border: iced::Border { color: BG_DEEPEST, width: 1.0, radius: iced::border::Radius::new(0.0) },
+            border: iced::Border { color: bg_deepest(), width: 1.0, radius: iced::border::Radius::new(0.0) },
             ..Default::default()
         })
         .into()
@@ -531,15 +966,15 @@ fn mouse_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
     .width(Length::Fill);
 
     column![
-        text("Mouse").size(16).color(TEXT_BRIGHT),
+        text("Mouse").size(16).color(text_bright()),
         text("What each mouse action does when clicked/scrolled over the video.")
             .size(12)
-            .color(TEXT_MUTED),
+            .color(text_muted()),
         gap(),
         container(rows)
             .width(Length::Fill)
             .style(|_| container::Style {
-                background: Some(iced::Background::Color(BG_SURFACE)),
+                background: Some(iced::Background::Color(bg_surface())),
                 border: iced::Border { radius: iced::border::Radius::new(6.0), ..Default::default() },
                 ..Default::default()
             }),

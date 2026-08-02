@@ -47,6 +47,11 @@ struct MONITORINFO {
 
 const GWLP_WNDPROC: i32 = -4;
 
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(hwnd: HWND, attr: u32, value: *const u32, size: u32) -> i32;
+}
+
 #[link(name = "user32")]
 unsafe extern "system" {
     fn EnumWindows(cb: unsafe extern "system" fn(HWND, isize) -> i32, l: isize) -> i32;
@@ -1112,6 +1117,63 @@ static OWN_CLASS: OnceLock<String> = OnceLock::new();
 /// (WM_ENTERSIZEMOVE) rather than on every WM_MOVING for efficiency.
 static SIBLING_RECTS: Mutex<Vec<RECT>> = Mutex::new(Vec::new());
 
+// ---------------------------------------------------------------------------
+// Window chrome - the parts of the frame Windows draws, not us
+// ---------------------------------------------------------------------------
+
+/// Tells DWM to shade the caption, border and shadow dark. Mostly visible via
+/// the system border, since the title bar is normally drawn by the app.
+const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+/// Windows 11 22000+. Fails silently on older builds, which is fine - the
+/// window just keeps its default border.
+const DWMWA_BORDER_COLOR: u32 = 34;
+
+/// Theme values for the current enumeration pass. The callback signature has
+/// no room for state beyond its `isize` lparam, so this keeps that free.
+static CHROME: AtomicI64 = AtomicI64::new(0);
+
+/// Point the OS-drawn parts of the frame at the active theme.
+///
+/// Applies to every top-level window we own, not just the main one: the
+/// settings window and a popped-out panel are separate hwnds, and left alone
+/// they keep the system default while the rest of the app is themed.
+///
+/// `dark` is whether the theme's own background is dark - that is what the
+/// system frame sits against - not the OS's dark-mode setting. `border` is
+/// packed 0x00RRGGBB.
+pub fn apply_window_chrome(dark: bool, border: u32) {
+    CHROME.store(((dark as i64) << 32) | (border as i64 & 0xFF_FF_FF), Ordering::SeqCst);
+    unsafe { EnumWindows(enum_chrome_cb, 0) };
+}
+
+unsafe extern "system" fn enum_chrome_cb(hwnd: HWND, _: isize) -> i32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    if pid != unsafe { GetCurrentProcessId() } {
+        return 1;
+    }
+    // Owned windows are tooltips and menu popups, not real frames.
+    if unsafe { GetWindow(hwnd, GW_OWNER) } != 0 {
+        return 1;
+    }
+    let packed = CHROME.load(Ordering::SeqCst);
+    apply_chrome_to(hwnd, (packed >> 32) & 1 == 1, (packed & 0xFF_FF_FF) as u32);
+    1
+}
+
+fn apply_chrome_to(hwnd: HWND, dark: bool, border: u32) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let flag: u32 = if dark { 1 } else { 0 };
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &flag, 4);
+        // COLORREF is 0x00BBGGRR - byte order reversed from our packed value.
+        let colorref = ((border & 0xFF) << 16) | (border & 0xFF00) | ((border >> 16) & 0xFF);
+        DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &colorref, 4);
+    }
+}
+
 fn get_class_name(hwnd: HWND) -> Option<String> {
     let mut buf = [0u16; 256];
     let len = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
@@ -1475,6 +1537,9 @@ pub fn install(
                 let orig = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, wnd_proc as *const () as isize) };
                 if orig != 0 {
                     ORIG_WNDPROC.store(orig, Ordering::SeqCst);
+                    // The theme was applied long before this thread found the
+                    // window, so the frame is still at its defaults.
+                    crate::app::apply_window_chrome_now();
                     tracing::info!(hwnd, attempt, "modal hook: WndProc installed ok");
                     return;
                 }

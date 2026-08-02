@@ -5,10 +5,10 @@
 
 use iced::{
     Alignment, Border, Color, Element, Length,
-    widget::{Space, container, image, mouse_area, row, stack, text, tooltip},
+    widget::{container, mouse_area, row, text, tooltip},
 };
 
-use super::{AURORA_GREEN, AURORA_PURPLE, AURORA_TEAL, BG_DEEPEST, BG_SURFACE, TEXT_BRIGHT, icons};
+use super::{accent_green, accent_purple, accent_teal, bg_deepest, bg_surface, text_bright, icons};
 use crate::app::{Message, MpvNe, use_custom_title_bar};
 
 pub fn view(app: &MpvNe) -> Element<'_, Message> {
@@ -22,15 +22,12 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         String::new()
     };
 
-    let title_label = text(format!("{}{}", full_title, playlist_counter))
-        .size(13)
-        .color(TEXT_BRIGHT)
-        .wrapping(iced::widget::text::Wrapping::None);
+    let title = format!("{}{}", full_title, playlist_counter);
 
-    let title_tip = container(text(format!("{}{}", full_title, playlist_counter)).size(11).color(TEXT_BRIGHT))
+    let title_tip = container(text(title.clone()).size(11).color(text_bright()))
         .padding([4, 8])
         .style(|_| container::Style {
-            background: Some(iced::Background::Color(BG_DEEPEST)),
+            background: Some(iced::Background::Color(bg_deepest())),
             border: Border {
                 radius: iced::border::Radius::new(4.0),
                 ..Default::default()
@@ -40,53 +37,17 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
 
     // We emit DragWindow here unconditionally; the handler in update() defers
     // to edge-grip resize if the cursor happens to be in an edge zone.
-    // Fade the title into the background on the right so it never wraps.
-    // A 56px gradient overlay (transparent -> BG_SURFACE) sits over the text.
-    let fade_bg = Color::from_rgba(
-        BG_SURFACE.r, BG_SURFACE.g, BG_SURFACE.b, 0.0,
-    );
-    let fade = container(Space::new())
-        .width(Length::Fixed(56.0))
-        .height(Length::Fill)
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Gradient(
-                iced::Gradient::Linear(
-                    iced::gradient::Linear::new(
-                        iced::Radians(std::f32::consts::FRAC_PI_2),
-                    )
-                    .add_stop(0.0, fade_bg)
-                    .add_stop(1.0, BG_SURFACE),
-                ),
-            )),
-            ..Default::default()
-        });
-
-    let fade_overlay = container(fade)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Right);
-
-    let title_stack = stack![
-        container(title_label)
-            .padding([0, 8])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_y(Alignment::Center)
-            .clip(true),
-        fade_overlay,
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill);
+    let title_stack = super::title_region(title);
 
     // Main menu: same content as the video right-click menu, opened at a
     // fixed anchor near this button instead of the cursor.
-    let menu_btn = icons::tipped(
-        icons::square_toggle(icons::hamburger(), app.menu_window_id.is_some(), AURORA_TEAL)
+    let menu_btn = icons::tipped_below(
+        icons::square_toggle(icons::hamburger(), app.menu_window_id.is_some(), accent_teal())
             .on_press(Message::ToggleMainMenu),
         "Menu",
     );
 
-    let logo = image(app.img_icon.clone())
+    let logo = iced::widget::svg(app.img_icon.clone())
     .width(Length::Fixed(22.0))
     .height(Length::Fixed(22.0));
 
@@ -109,28 +70,28 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     // *current* state: open eye when chrome is visible (click to enter focus),
     // crossed-out eye when chrome is force-hidden (click to leave focus).
     let focus_glyph = if app.chrome_force_hidden { icons::eye_off() } else { icons::eye() };
-    let focus_btn = icons::tipped(
-        icons::square_toggle(focus_glyph, app.chrome_force_hidden, AURORA_GREEN)
+    let focus_btn = icons::tipped_below(
+        icons::square_toggle(focus_glyph, app.chrome_force_hidden, accent_green())
             .on_press(Message::ToggleChrome),
         "Focus mode (H)",
     );
 
     let pin_glyph = if app.pinned { icons::pin_active() } else { icons::pin() };
-    let pin_btn = icons::tipped(
-        icons::square_toggle(pin_glyph, app.pinned, AURORA_PURPLE).on_press(Message::TogglePin),
+    let pin_btn = icons::tipped_below(
+        icons::square_toggle(pin_glyph, app.pinned, accent_purple()).on_press(Message::TogglePin),
         "Always on top",
     );
 
-    let pip_btn = icons::tipped(
-        icons::square_toggle(icons::pip(), app.pip_active, AURORA_TEAL)
+    let pip_btn = icons::tipped_below(
+        icons::square_toggle(icons::pip(), app.pip_active, accent_teal())
             .on_press(Message::TogglePip),
         "Picture-in-Picture",
     );
 
     // Fullscreen lives on the bottom controls bar - that's where playback
     // actions belong. Top bar is reserved for window-level toggles.
-    let help_btn = icons::tipped(
-        icons::square_toggle(icons::help(), app.show_help, AURORA_TEAL)
+    let help_btn = icons::tipped_below(
+        icons::square_toggle(icons::help(), app.show_help, accent_teal())
             .on_press(Message::ShowHelp),
         "Keyboard shortcuts (?)",
     );
@@ -154,15 +115,15 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     }
 
     if use_custom_title_bar() {
-        let min_btn = icons::tipped(
+        let min_btn = icons::tipped_below(
             icons::square_btn(icons::window_minimize()).on_press(Message::MinimizeWindow),
             "Minimize",
         );
-        let max_btn = icons::tipped(
+        let max_btn = icons::tipped_below(
             icons::square_btn(icons::window_maximize()).on_press(Message::ToggleMaximize),
             "Maximize",
         );
-        let close_btn = icons::tipped(
+        let close_btn = icons::tipped_below(
             icons::square_btn(icons::window_close()).on_press(Message::CloseWindow),
             "Close",
         );
@@ -179,7 +140,7 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
     .width(Length::Fill)
     .height(Length::Fixed(44.0))
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(BG_SURFACE)),
+        background: Some(iced::Background::Color(bg_surface())),
         ..Default::default()
     })
     .into()
