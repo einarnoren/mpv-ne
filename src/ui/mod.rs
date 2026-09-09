@@ -1,6 +1,7 @@
 pub mod app_settings;
 mod browser_panel;
 mod chapter_panel;
+mod media_info_panel;
 mod controls;
 pub mod theme;
 mod edge_grips;
@@ -497,6 +498,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         ("Browser",  PanelKind::Browser),
         ("Recent",   PanelKind::Recent),
         ("Chapters", PanelKind::Chapters),
+        ("Info",     PanelKind::MediaInfo),
         ("Playback", PanelKind::Settings),
     ];
 
@@ -539,6 +541,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
                 PanelKind::Browser  => "File browser",
                 PanelKind::Recent   => "Recently played",
                 PanelKind::Chapters => "Chapters",
+                PanelKind::MediaInfo => "Media info",
                 PanelKind::Settings => "Playback settings",
             };
             let tipped_tab = tooltip(tab, text(tip_text).size(11), tooltip::Position::Bottom)
@@ -597,6 +600,7 @@ fn tabbed_panel(app: &MpvNe, active: PanelKind, detached: bool) -> Element<'_, M
         PanelKind::Browser  => browser_panel::view(app),
         PanelKind::Recent   => recent_panel::view(app),
         PanelKind::Chapters => chapter_panel::view(app),
+        PanelKind::MediaInfo => media_info_panel::view(app),
         PanelKind::Settings => settings::view(app),
     };
 

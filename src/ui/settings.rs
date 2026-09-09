@@ -54,6 +54,9 @@ struct SettingsSnapshot {
     eq_enabled: bool,
     eq_gains: Vec<f64>,
     audio_lang: String,
+    audio_device: String,
+    sub_auto_load: bool,
+    audio_devices: Vec<crate::player::AudioDevice>,
 
     sub_tracks: Vec<SubTrack>,
     current_sid: i64,
@@ -114,6 +117,9 @@ impl SettingsSnapshot {
             eq_enabled: p.eq_enabled,
             eq_gains: p.eq_gains.clone(),
             audio_lang: app.audio_lang.clone(),
+            audio_device: app.audio_device.clone(),
+            sub_auto_load: app.sub_auto_load,
+            audio_devices: app.audio_devices.clone(),
 
             sub_tracks: p.sub_tracks.clone(),
             current_sid: p.current_sid,
@@ -182,6 +188,9 @@ impl std::hash::Hash for SettingsSnapshot {
         self.eq_enabled.hash(state);
         for g in &self.eq_gains { hash_f64(*g, state); }
         self.audio_lang.hash(state);
+        self.audio_device.hash(state);
+        self.sub_auto_load.hash(state);
+        self.audio_devices.hash(state);
 
         self.sub_tracks.hash(state);
         self.current_sid.hash(state);
@@ -349,6 +358,12 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         category("Audio"),
         section("Track", audio_track_list(app)),
         gap(),
+        section_sub(
+            "Output device",
+            "Which device audio plays through - takes effect immediately",
+            audio_device_list(app),
+        ),
+        gap(),
         section_sub("Audio sync", "Shift audio earlier/later, relative to video", delay_row(
             app.audio_delay,
             Message::AudioDelayAdjust(-0.5),
@@ -392,6 +407,19 @@ fn build_content(app: &SettingsSnapshot) -> Element<'static, Message> {
         // ── Subtitles ─────────────────────────────────────────────
         category("Subtitles"),
         section("Track", sub_track_list(app)),
+        gap(),
+        section_sub(
+            "Auto-load from folder",
+            "Pick up .srt/.ass files named after the video - applies from the next file",
+            row![
+                toggle_btn(
+                    if app.sub_auto_load { "On" } else { "Off" },
+                    app.sub_auto_load,
+                    Message::ToggleSubAutoLoad,
+                    accent_green(),
+                ),
+            ].into(),
+        ),
         gap(),
         section_sub(
             "Secondary track",
@@ -1228,6 +1256,28 @@ fn audio_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {
         track_btn(t.label.clone(), t.id == app.current_aid, Message::AudioTrackSelected(t.clone()), accent_purple())
     });
     column(rows).spacing(4).into()
+}
+
+fn audio_device_list(app: &SettingsSnapshot) -> Element<'static, Message> {
+    if app.audio_devices.is_empty() {
+        // The list is fetched when this tab opens; until then there is
+        // nothing to show, and mpv is on its own default.
+        return text("Reading devices…").size(11).color(text_muted()).into();
+    }
+    let current = app
+        .audio_devices
+        .iter()
+        .find(|d| d.name == app.audio_device)
+        .cloned();
+    iced::widget::pick_list(
+        app.audio_devices.clone(),
+        current,
+        |d: crate::player::AudioDevice| Message::SetAudioDevice(d.name),
+    )
+    .text_size(12)
+    .padding([5, 10])
+    .width(Length::Fill)
+    .into()
 }
 
 fn sub_track_list(app: &SettingsSnapshot) -> Element<'static, Message> {

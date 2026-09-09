@@ -98,6 +98,15 @@ pub struct AudioSettings {
     /// `MpvNe`'s startup wiring.
     pub eq_enabled: bool,
     pub eq_gains: Vec<f64>,
+    /// mpv `audio-device` name, or "auto" to let mpv choose. Stored by name
+    /// rather than by index: the device list changes as hardware comes and
+    /// goes, so an index would silently point at a different output.
+    #[serde(default = "default_audio_device")]
+    pub device: String,
+}
+
+pub fn default_audio_device() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -105,6 +114,15 @@ pub struct AudioSettings {
 pub struct SubtitleSettings {
     /// Same as `AudioSettings::lang` but for subtitle tracks (mpv's `slang`).
     pub lang: String,
+    /// Load subtitle files found beside the video (mpv's `sub-auto=fuzzy`).
+    /// On by default - it is what most people expect of a player, and mpv's
+    /// stricter `exact` default misses the common `Name.lang.srt` form.
+    #[serde(default = "default_true")]
+    pub auto_load: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,8 +339,9 @@ impl Settings {
                 lang: str_of("audio_lang"),
                 eq_enabled: false,
                 eq_gains: Vec::new(),
+                device: default_audio_device(),
             },
-            subtitles: SubtitleSettings { lang: str_of("sub_lang") },
+            subtitles: SubtitleSettings { lang: str_of("sub_lang"), auto_load: true },
             streaming: StreamingSettings {
                 quality_height: u32_of("stream_quality_height").unwrap_or(1080),
             },

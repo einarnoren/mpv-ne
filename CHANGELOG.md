@@ -6,6 +6,35 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.5.2] — 2026-09-10
+
+Three additions to what the player can tell you and control.
+
+### Added
+- **Audio output device selection** (Playback settings → Audio → Output
+  device). Picks the device audio plays through instead of following the
+  system default, and takes effect on the file already playing. Stored by
+  mpv device name rather than list position, since devices come and go and
+  an index would silently point at a different output.
+- **Auto-load external subtitles** (Playback settings → Subtitles), on by
+  default. Loads subtitle files sitting beside the video using mpv's
+  `sub-auto=fuzzy`, which matches any sibling whose name starts with the
+  video's - so `Film.en.srt` and `Film.forced.srt` both load next to
+  `Film.mkv`. mpv's own default is `exact`, which only matches `Film.srt`
+  and misses the form nearly everything ships. The folder search was
+  widened too (`sub:subs:Subs:subtitles:Subtitles`), since release groups
+  use a `Subs/` directory and the lookup is case-sensitive off Windows.
+  Applies from the next file loaded, as mpv reads the option at load time.
+- **Media info panel** - a new "Info" tab showing what the file actually
+  is: container, duration and size; video codec, format, resolution, frame
+  rate, bitrate, pixel format, colour matrix, primaries, transfer, levels
+  and decoder; audio codec, format, channels, layout, sample rate and
+  bitrate. The stats overlay says whether playback is healthy right now;
+  this says what is playing. Fixed properties are read once when the file
+  loads rather than polled - only the bitrates change during playback.
+
+---
+
 ## [0.5.1] — 2026-08-10
 
 Small fixes plus a debug logging option for tracking down playback issues.

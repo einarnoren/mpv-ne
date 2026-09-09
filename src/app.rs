@@ -65,6 +65,7 @@ pub enum PanelKind {
     Browser,
     Recent,
     Chapters,
+    MediaInfo,
     Settings,
 }
 
@@ -576,6 +577,15 @@ pub struct MpvNe {
     /// Preferred audio/subtitle track languages (ISO 639 codes, e.g. "eng").
     /// Empty = no preference. See `Settings::audio_lang`/`sub_lang`.
     pub audio_lang: String,
+    /// Chosen mpv `audio-device` name, or "auto".
+    pub audio_device: String,
+    /// Load subtitle files sitting beside the video.
+    pub sub_auto_load: bool,
+    /// Fixed description of the loaded file. `None` until something loads.
+    pub media_info: Option<crate::player::MediaInfo>,
+    /// Output devices mpv can see. Refreshed when the settings tab is opened
+    /// rather than held live - the list only changes when hardware does.
+    pub audio_devices: Vec<crate::player::AudioDevice>,
     pub sub_lang: String,
     /// Whether seeking lands on the exact frame ("precise") or the nearest
     /// keyframe (faster, less exact). See `Settings::precise_seek`.
@@ -955,6 +965,10 @@ impl Default for MpvNe {
             private_mode: false,
             audio_normalize: prefs.audio.normalize,
             audio_lang: prefs.audio.lang.clone(),
+            audio_device: prefs.audio.device.clone(),
+            sub_auto_load: prefs.subtitles.auto_load,
+            media_info: None,
+            audio_devices: Vec::new(),
             sub_lang: prefs.subtitles.lang.clone(),
             precise_seek: prefs.playback.precise_seek,
             seek_step_secs: prefs.playback.seek_step_secs,
@@ -1065,6 +1079,16 @@ impl Default for MpvNe {
             pre_fullscreen_h: None,
         };
         app.player.set_audio_normalize(app.audio_normalize);
+        app.player.set_sub_auto(app.sub_auto_load);
+        if app.audio_device != "auto" {
+            app.player.set_audio_device(&app.audio_device);
+        }
+        // The device list is deliberately NOT fetched here. Enumerating
+        // outputs makes mpv's WASAPI backend initialise COM on this thread as
+        // multi-threaded, and winit's window creation then fails its
+        // OleInitialize with RPC_E_CHANGED_MODE because it needs an
+        // apartment-threaded one. The list is read when the settings tab
+        // opens instead, long after the window exists.
         app.player.set_lang_priority(&app.audio_lang, &app.sub_lang);
         app.player.set_stream_quality(app.stream_quality_height);
         // Start the custom slots from the default palette so any slot without
@@ -1289,6 +1313,10 @@ pub enum Message {
     /// Play the playlist in random order.
     ToggleShuffle,
     SetTheme(crate::ui::theme::Theme),
+    /// Choose an audio output device by mpv name.
+    SetAudioDevice(String),
+    /// Turn sibling-subtitle loading on or off.
+    ToggleSubAutoLoad,
     /// Edit one custom-theme colour: slot index, new hex text.
     SetCustomColor(usize, String),
     /// Open or close the swatch grid for a custom-colour slot.
@@ -1893,9 +1921,11 @@ impl MpvNe {
                                 lang: self.audio_lang.clone(),
                                 eq_enabled: self.player.eq_enabled,
                                 eq_gains: self.player.eq_gains.clone(),
+                                device: self.audio_device.clone(),
                             },
                             subtitles: crate::settings::SubtitleSettings {
                                 lang: self.sub_lang.clone(),
+                                auto_load: self.sub_auto_load,
                             },
                             streaming: crate::settings::StreamingSettings {
                                 quality_height: self.stream_quality_height,
@@ -2097,6 +2127,9 @@ impl MpvNe {
                 }
             }
             Message::FileLoaded => {
+                // Read once here: these properties are fixed for the file, so
+                // there is nothing to gain from polling them on the tick.
+                self.media_info = Some(self.player.media_info());
                 self.last_load_error = None;
                 self.stopped = false;
                 self.transitioning = false;
@@ -4669,6 +4702,24 @@ impl MpvNe {
                     self.open_next(p.to_string_lossy().into_owned());
                 }
             }
+            Message::ToggleSubAutoLoad => {
+                self.sub_auto_load = !self.sub_auto_load;
+                self.player.set_sub_auto(self.sub_auto_load);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.subtitles.auto_load = self.sub_auto_load;
+                prefs.save();
+                let state = if self.sub_auto_load { "on" } else { "off" };
+                return Task::done(Message::ShowOsd(format!(
+                    "Auto-load subtitles {state} - applies from the next file"
+                )));
+            }
+            Message::SetAudioDevice(name) => {
+                self.audio_device = name.clone();
+                self.player.set_audio_device(&name);
+                let mut prefs = crate::settings::Settings::load();
+                prefs.audio.device = name;
+                prefs.save();
+            }
             Message::SetTheme(t) => {
                 // Selecting Custom for the first time seeds it from the
                 // theme that was showing, so there's something coherent to
@@ -5068,6 +5119,13 @@ impl MpvNe {
                 // Open a different panel (or open from closed).
                 if k == PanelKind::Browser && self.browser_entries.is_empty() {
                     self.browser_entries = browser_drives();
+                }
+                // Re-read on every open rather than caching: devices come and
+                // go while the app runs (a headset connected, a monitor with
+                // speakers unplugged), and a stale list would offer outputs
+                // that no longer exist.
+                if k == PanelKind::Settings {
+                    self.audio_devices = self.player.audio_devices();
                 }
                 self.active_panel = Some(k);
                 self.last_panel = k; // remember for the next quick toggle

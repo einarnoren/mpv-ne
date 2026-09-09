@@ -21,6 +21,42 @@ pub struct SubTrack {
     pub label: String,
 }
 
+/// Fixed properties of the loaded file, for the Media info panel. Every
+/// field is optional because mpv reports nothing at all for some of them
+/// depending on container and codec - an audio-only file has no video params,
+/// a network stream has no file size.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct MediaInfo {
+    pub file_format: Option<String>,
+    pub video_format: Option<String>,
+    pub pixel_format: Option<String>,
+    pub colormatrix: Option<String>,
+    pub color_levels: Option<String>,
+    pub gamma: Option<String>,
+    pub audio_format: Option<String>,
+    pub audio_samplerate: i64,
+    pub audio_channel_layout: Option<String>,
+    pub file_size: i64,
+}
+
+/// One audio output device from mpv's `audio-device-list`. `name` is the
+/// identifier the `audio-device` property expects; `description` is what a
+/// person should see.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AudioDevice {
+    pub name: String,
+    pub description: String,
+}
+
+impl std::fmt::Display for AudioDevice {
+    /// `pick_list` renders items through `Display`, and the description is
+    /// the half a person can act on - the name is an API string like
+    /// `wasapi/{0.0.0.00000000}.{...}`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.description)
+    }
+}
+
 /// One audio track from `track-list`. Same shape as `SubTrack` but a distinct
 /// type so `Message::AudioTrackSelected` and `SubTrackSelected` stay unambiguous.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -379,6 +415,12 @@ impl Player {
             // characters the OS filesystem can't handle (e.g. ':') on its own.
             set_opt_str(h, "screenshot-template", "%F_%P");
 
+            // Where mpv looks for sibling subtitle files. Its default is
+            // "sub:subtitles"; the capitalised forms and "Subs" are what
+            // release groups actually ship, and the lookup is case-sensitive
+            // on non-Windows filesystems.
+            set_opt_str(h, "sub-file-paths", "sub:subs:Subs:subtitles:Subtitles");
+
             let rc = sys::mpv_initialize(h);
             tracing::info!(rc, "mpv_initialize");
             assert_eq!(rc, 0, "mpv_initialize failed: {rc}");
@@ -567,6 +609,78 @@ impl Player {
     /// with all external subtitle formats - same caveat mpv itself documents.
     pub fn sub_seek(&self, forward: bool) {
         command(self.handle.0, &["sub-seek", if forward { "1" } else { "-1" }]);
+    }
+
+    /// Every audio output device mpv can see.
+    ///
+    /// Read through the indexed `audio-device-list/N/...` properties rather
+    /// than parsing the list as a node - same approach as `fetch_sub_tracks`,
+    /// and it avoids the node-allocation dance entirely.
+    pub fn audio_devices(&self) -> Vec<AudioDevice> {
+        let h = self.handle.0;
+        let count = get_prop_i64(h, "audio-device-list/count");
+        (0..count)
+            .filter_map(|i| {
+                let name = get_prop_string(h, &format!("audio-device-list/{i}/name"))?;
+                let description = get_prop_string(h, &format!("audio-device-list/{i}/description"))
+                    .filter(|d| !d.is_empty())
+                    // mpv's own entry for the default is named "auto" with no
+                    // description; give it something readable.
+                    .unwrap_or_else(|| if name == "auto" {
+                        "System default".to_string()
+                    } else {
+                        name.clone()
+                    });
+                Some(AudioDevice { name, description })
+            })
+            .collect()
+    }
+
+    /// The parts of a file's description that don't change while it plays.
+    ///
+    /// Read once on load rather than on the stats tick: container, codecs and
+    /// colour metadata are fixed for the file, and only the bitrates and
+    /// frame counters need refreshing (those already come from `stats`).
+    pub fn media_info(&self) -> MediaInfo {
+        let h = self.handle.0;
+        let s = |name: &str| get_prop_string(h, name).filter(|v| !v.is_empty());
+        MediaInfo {
+            file_format: s("file-format"),
+            video_format: s("video-format"),
+            pixel_format: s("video-params/pixelformat"),
+            colormatrix: s("video-params/colormatrix"),
+            color_levels: s("video-params/colorlevels"),
+            gamma: s("video-params/gamma"),
+            audio_format: s("audio-params/format"),
+            audio_samplerate: get_prop_i64(h, "audio-params/samplerate"),
+            audio_channel_layout: s("audio-params/hr-channels")
+                .or_else(|| s("audio-params/channel-count")),
+            // Byte size of the source. Absent for streams, which have no
+            // single file behind them.
+            file_size: get_prop_i64(h, "file-size").max(0),
+        }
+    }
+
+    /// Whether to pick up subtitle files sitting next to the video.
+    ///
+    /// `fuzzy` loads any sibling whose name *starts with* the video's, so
+    /// `Film.en.srt` and `Film.forced.srt` both come in alongside `Film.mkv`.
+    /// mpv's own default is `exact`, which only matches `Film.srt`.
+    ///
+    /// Applied at file load, so a change takes effect from the next file
+    /// rather than retroactively.
+    pub fn set_sub_auto(&self, on: bool) {
+        set_opt_str(self.handle.0, "sub-auto", if on { "fuzzy" } else { "no" });
+    }
+
+    /// Choose the audio output. "auto" hands the choice back to mpv.
+    ///
+    /// mpv reinitialises the output itself, so this takes effect on the
+    /// currently playing file without a reload.
+    pub fn set_audio_device(&self, name: &str) {
+        let n = CString::new("audio-device").unwrap();
+        let v = CString::new(name).unwrap();
+        unsafe { sys::mpv_set_property_string(self.handle.0, n.as_ptr(), v.as_ptr()) };
     }
 
     /// Pick a subtitle track by id. id <= 0 means "off" (sid=no), id > 0 is a
