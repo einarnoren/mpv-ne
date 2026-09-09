@@ -6,6 +6,35 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.5.1] — 2026-08-10
+
+Small fixes plus a debug logging option for tracking down playback issues.
+
+### Fixes
+- **Fullscreen no longer shows a stray 1px border.** The window's outline
+  and inset padding were always drawn, even with no OS frame around it to
+  outline in fullscreen - now skipped when fullscreen is active.
+- **Local HLS manifests (`.m3u8`) referencing remote segments now play.**
+  A local live-playback file opened via `file://` was hitting ffmpeg's
+  restrictive default protocol whitelist for nested requests, silently
+  failing to load any video or audio. mpv's own top-level whitelist
+  allowed it, but the nested demuxer didn't inherit it - explicitly
+  forwarding the whitelist through fixes it.
+- Opening a `.m3u8`/`.m3u`/`.mpd` no longer pulls unrelated files from the
+  same folder into a sibling playlist - manifests are their own self-
+  contained "playlist" and mixing them with folder scanning made no sense.
+
+### Debug tools
+- **Debug logging** (Interface settings) - writes mpv/app debug output to
+  a log file next to the exe, for diagnosing a playback issue after the
+  fact. Off by default; takes effect on restart.
+- **Log Viewer** - a live, in-app window (Interface settings → "Open log
+  viewer") showing recent debug output as it happens, with Copy all and
+  Clear buttons. No restart or setting needed - useful for grabbing
+  details to include in a bug report.
+
+---
+
 ## [0.4.11] — 2026-07-31
 
 Better URL support, and failures that actually tell you what went wrong.

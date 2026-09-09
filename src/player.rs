@@ -325,6 +325,22 @@ impl Player {
             assert!(!h.is_null(), "mpv_create failed");
 
             set_opt_str(h, "vo", "libmpv");
+            // A *local* .m3u8 (e.g. a recorder's live-playback file dropped
+            // in Temp) that references remote https:// segments trips up
+            // ffmpeg's own HLS demuxer: when the root playlist is opened
+            // via the file:// protocol, ffmpeg scopes nested sub-requests to a
+            // restrictive default whitelist that doesn't include https,
+            // even though mpv's own top-level protocol-whitelist allows it.
+            // demuxer-lavf-o forwards protocol_whitelist straight to
+            // libavformat so those nested opens are allowed too.
+            // demuxer-lavf-o is a comma-separated key=value list, so the
+            // commas inside protocol_whitelist's own value can't appear
+            // literally (backslash-escaping them still failed - rc=-7).
+            // mpv's raw-string syntax `%N%text` (N = byte length of text)
+            // sidesteps delimiter parsing entirely by giving the value's
+            // exact length up front instead of relying on a terminator.
+            let wl = "file,crypto,data,http,https,httpproxy,hls,tcp,tls,udp";
+            set_opt_str(h, "demuxer-lavf-o", &format!("protocol_whitelist=%{}%{wl}", wl.len()));
             // Enable hardware decoding. -copy variants pull decoded frames
             // back to system memory so they work with our SW render path.
             // auto-copy-safe picks the best available decoder per platform:
@@ -1507,7 +1523,10 @@ fn command_str(h: *mut sys::mpv_handle, cmd: &str) {
 fn set_opt_str(h: *mut sys::mpv_handle, name: &str, val: &str) {
     let n = CString::new(name).unwrap();
     let v = CString::new(val).unwrap();
-    unsafe { sys::mpv_set_option_string(h, n.as_ptr(), v.as_ptr()) };
+    let rc = unsafe { sys::mpv_set_option_string(h, n.as_ptr(), v.as_ptr()) };
+    if rc != 0 {
+        tracing::warn!(name, val, rc, "set_opt_str failed");
+    }
 }
 
 #[allow(dead_code)]

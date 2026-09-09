@@ -5,6 +5,7 @@ mod controls;
 pub mod theme;
 mod edge_grips;
 mod icons;
+pub mod log_viewer;
 mod playlist_panel;
 mod recent_panel;
 mod settings;
@@ -830,12 +831,13 @@ pub fn view(app: &MpvNe) -> Element<'_, Message> {
         .height(Length::Fill)
         // Children paint over the container's own border, so inset them by
         // the stroke width or the outline is drawn and then covered up.
-        .padding(1)
-        .style(|_| container::Style {
+        // In fullscreen there's no OS frame to outline, so drop both.
+        .padding(if app.fullscreen { 0 } else { 1 })
+        .style(move |_| container::Style {
             background: Some(iced::Background::Color(bg_deepest())),
             border: iced::Border {
                 color: crate::ui::theme::border(),
-                width: 1.0,
+                width: if app.fullscreen { 0.0 } else { 1.0 },
                 ..Default::default()
             },
             ..Default::default()

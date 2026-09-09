@@ -38,6 +38,7 @@ struct AppSettingsSnapshot {
     minimize_to_tray: bool,
     auto_retry_download: bool,
     gl_render: bool,
+    debug_logging: bool,
     theme: crate::ui::theme::Theme,
     custom_colors: Vec<String>,
     custom_picker: Option<usize>,
@@ -75,6 +76,7 @@ impl AppSettingsSnapshot {
             minimize_to_tray: app.minimize_to_tray,
             auto_retry_download: app.auto_retry_download,
             gl_render: app.gl_render,
+            debug_logging: app.debug_logging,
             theme: app.theme,
             custom_colors: app.custom_colors.clone(),
             custom_picker: app.custom_picker,
@@ -269,6 +271,7 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
         toggle_row("Single instance", Some("Opening another file hands it off to the running window instead of starting a new one - requires restart"), app.single_instance, Message::ToggleSingleInstance),
         toggle_row("Auto-retry failed URLs via download", Some("If a URL fails to open directly, automatically retry it via yt-dlp download instead of just failing"), app.auto_retry_download, Message::ToggleAutoRetryDownload),
         toggle_row("GPU video rendering", Some("Render video on the GPU (OpenGL) instead of the CPU - much smoother for 4K. Takes effect on restart; falls back to CPU automatically if unsupported"), app.gl_render, Message::ToggleGlRender),
+        toggle_row("Debug logging", Some("Write mpv/app debug logs to mpvne-debug.log next to the exe - useful for diagnosing a playback issue. Takes effect on restart"), app.debug_logging, Message::ToggleDebugLogging),
     ]
     .spacing(0)
     .width(Length::Fill);
@@ -303,6 +306,12 @@ fn interface_category(app: &AppSettingsSnapshot) -> Element<'static, Message> {
             "File associations",
             "Register MPV-NE as an option in \"Open with\", then pick it as default in the Windows settings that open",
             action_btn("Register file associations", Message::RegisterFileAssociations, accent_teal()),
+        ),
+        gap(),
+        settings_section(
+            "Log viewer",
+            "Live view of recent debug output - useful for grabbing details when reporting a bug",
+            action_btn("Open log viewer", Message::OpenLogViewer, accent_purple()),
         ),
     ]
     .spacing(0)

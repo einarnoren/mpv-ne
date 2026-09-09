@@ -216,6 +216,13 @@ pub struct InterfaceSettings {
     pub mouse_scroll_up: String,
     #[serde(default = "default_mouse_scroll_down")]
     pub mouse_scroll_down: String,
+    /// Write mpv/app debug logs to `mpvne-debug.log` next to the exe (or in
+    /// Temp if that folder isn't writable). Off by default - only useful
+    /// when diagnosing a playback issue, and log files were previously
+    /// only reachable via a hidden `--log` flag or a `debug.enable` marker
+    /// file, which wasn't discoverable without being told about it.
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 fn default_auto_retry_download() -> bool { true }
@@ -256,6 +263,7 @@ impl Default for InterfaceSettings {
             mouse_double_click: default_mouse_double_click(),
             mouse_scroll_up: default_mouse_scroll_up(),
             mouse_scroll_down: default_mouse_scroll_down(),
+            debug_logging: false,
         }
     }
 }

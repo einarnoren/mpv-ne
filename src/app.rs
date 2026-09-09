@@ -644,6 +644,10 @@ pub struct MpvNe {
     /// Settings, but only takes effect on restart (the render loop is
     /// spawned once per stream from a global flag - see gl_render.rs).
     pub gl_render: bool,
+    /// Write mpv/app debug logs to a file next to the exe - persisted and
+    /// shown in Settings, but only takes effect on restart (the log file
+    /// is opened once in `main` before the app exists).
+    pub debug_logging: bool,
     /// URL waiting on `download_ytdlp` to finish before it can be opened -
     /// set when a URL needs yt-dlp and it isn't available yet - see
     /// `Message::ModalConfirm`'s `ModalKind::OpenUrl` arm and
@@ -724,6 +728,20 @@ pub struct MpvNe {
     app_settings_last_pos: Option<(i32, i32)>,
     app_settings_last_size: Option<(f32, f32)>,
     pub app_settings_category: AppSettingsCategory,
+    /// Standalone Log Viewer window - shows the in-memory debug ring buffer
+    /// (see `debug_log`) live. `None` when closed. Uses native OS
+    /// decorations rather than the custom title bar - a debug tool doesn't
+    /// need to match the rest of the app's chrome.
+    pub log_viewer_window_id: Option<iced::window::Id>,
+    /// Cached snapshot of `debug_log::snapshot()`, refreshed on
+    /// `Message::LogViewerTick` while the window is open. Stored so `view`
+    /// doesn't have to lock the ring buffer on every redraw.
+    pub log_viewer_lines: Vec<String>,
+    /// Last reported scroll position of the log viewer, updated by
+    /// `Message::LogViewerScrolled`. `LogViewerTick` only auto-scrolls to
+    /// the newest line when this is already near the bottom, so reading
+    /// back through older lines isn't fought by the live tail.
+    log_viewer_scroll_offset: iced::widget::scrollable::RelativeOffset,
     /// Current OSD message. Empty string means nothing is shown.
     pub osd_message: String,
     /// Monotonic counter - ClearOsd only clears when its seq matches.
@@ -960,6 +978,7 @@ impl Default for MpvNe {
             single_instance: prefs.interface.single_instance,
             auto_retry_download: prefs.interface.auto_retry_download,
             gl_render: prefs.interface.gl_render,
+            debug_logging: prefs.interface.debug_logging,
             pending_ytdl_url: None,
             ytdlp_download: None,
             pending_ytdlp_open: None,
@@ -994,6 +1013,9 @@ impl Default for MpvNe {
             app_settings_last_pos: None,
             app_settings_last_size: None,
             app_settings_category: AppSettingsCategory::default(),
+            log_viewer_window_id: None,
+            log_viewer_lines: Vec::new(),
+            log_viewer_scroll_offset: iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
             osd_message: String::new(),
             osd_seq: 0,
             active_panel: None,
@@ -1325,6 +1347,7 @@ pub enum Message {
     ToggleModalDownloadMode,
     ToggleAutoRetryDownload,
     ToggleGlRender,
+    ToggleDebugLogging,
     /// Relaunch the app, reopening whatever is currently playing. Used to
     /// apply restart-required settings without making the user do it by
     /// hand - see `Message::ToggleGlRender`.
@@ -1426,6 +1449,19 @@ pub enum Message {
     AppSettingsMinimize,
     AppSettingsDragWindow,
     AppSettingsToggleMaximize,
+    /// Open the standalone Log Viewer window. No-op if already open.
+    OpenLogViewer,
+    /// Close the Log Viewer window.
+    CloseLogViewerWindow,
+    /// Refresh `log_viewer_lines` from the ring buffer and auto-scroll to
+    /// the bottom - polled while the window is open (see `subscription`).
+    LogViewerTick,
+    LogViewerScrolled(iced::widget::scrollable::RelativeOffset),
+    LogViewerClear,
+    /// Copy the entire visible buffer to the clipboard as plain text - the
+    /// main point of the viewer is handing this to someone else for a bug
+    /// report, and the raw log widget isn't selectable text.
+    LogViewerCopyAll,
     // Video zoom
     VideoZoomSet(f64),
     VideoZoomReset,
@@ -1881,6 +1917,7 @@ impl MpvNe {
                                 minimize_to_tray: self.minimize_to_tray,
                                 auto_retry_download: self.auto_retry_download,
                                 gl_render: self.gl_render,
+                                debug_logging: self.debug_logging,
                                 stats_pos_x: self.stats_pos.map(|(x, _)| x),
                                 stats_pos_y: self.stats_pos.map(|(_, y)| y),
                                 shuffle: self.shuffle,
@@ -2890,6 +2927,19 @@ impl MpvNe {
                     "GPU rendering off (restart to apply)".into()
                 }));
             }
+            Message::ToggleDebugLogging => {
+                self.debug_logging = !self.debug_logging;
+                let mut prefs = crate::settings::Settings::load();
+                prefs.interface.debug_logging = self.debug_logging;
+                prefs.save();
+                // Restart-required: the log file is opened once in `main`
+                // before the app (or any settings) exist.
+                return Task::done(Message::ShowOsd(if self.debug_logging {
+                    "Debug logging on (restart to apply)".into()
+                } else {
+                    "Debug logging off (restart to apply)".into()
+                }));
+            }
             Message::ModalRightClick => {
                 if self.modal.is_some() {
                     self.modal_paste_menu = self.cursor_pos;
@@ -3259,6 +3309,56 @@ impl MpvNe {
                     return iced::window::drag(id);
                 }
             }
+            Message::OpenLogViewer => {
+                if self.log_viewer_window_id.is_none() {
+                    self.log_viewer_lines = crate::debug_log::snapshot();
+                    self.log_viewer_scroll_offset = iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 };
+                    let settings = iced::window::Settings {
+                        size: iced::Size::new(700.0, 460.0),
+                        position: iced::window::Position::Centered,
+                        min_size: Some(iced::Size::new(400.0, 240.0)),
+                        resizable: true,
+                        // Native decorations, not the app's custom title bar
+                        // - a debug tool doesn't need to match the rest of
+                        // the app's chrome, and it skips needing its own
+                        // minimize/maximize/drag plumbing entirely.
+                        decorations: true,
+                        icon: app_icon(),
+                        exit_on_close_request: false,
+                        ..Default::default()
+                    };
+                    let (id, open_task) = iced::window::open(settings);
+                    self.log_viewer_window_id = Some(id);
+                    return open_task.discard();
+                }
+            }
+            Message::CloseLogViewerWindow => {
+                if let Some(id) = self.log_viewer_window_id.take() {
+                    return iced::window::close(id);
+                }
+            }
+            Message::LogViewerTick => {
+                self.log_viewer_lines = crate::debug_log::snapshot();
+                // Only follow the tail when already near the bottom - if the
+                // user scrolled up to read older lines, new output arriving
+                // every 300ms shouldn't yank them back down.
+                if self.log_viewer_scroll_offset.y >= 0.98 {
+                    return iced::widget::operation::snap_to(
+                        "log_viewer_scroll",
+                        iced::widget::scrollable::RelativeOffset { x: 0.0, y: 1.0 },
+                    );
+                }
+            }
+            Message::LogViewerScrolled(offset) => {
+                self.log_viewer_scroll_offset = offset;
+            }
+            Message::LogViewerClear => {
+                crate::debug_log::clear();
+                self.log_viewer_lines.clear();
+            }
+            Message::LogViewerCopyAll => {
+                return iced::clipboard::write(self.log_viewer_lines.join("\n"));
+            }
             Message::OpenFileLocation(path) => {
                 self.file_context_menu = None;
                 if let Some(dir) = path.parent() {
@@ -3566,6 +3666,9 @@ impl MpvNe {
                 if let Some(settings_id) = self.app_settings_window_id {
                     tasks.push(iced::window::close(settings_id));
                 }
+                if let Some(log_id) = self.log_viewer_window_id {
+                    tasks.push(iced::window::close(log_id));
+                }
                 tasks.push(iced::exit());
                 return Task::batch(tasks);
             }
@@ -3588,6 +3691,9 @@ impl MpvNe {
                     if let Some(settings_id) = self.app_settings_window_id {
                         tasks.push(iced::window::close(settings_id));
                     }
+                    if let Some(log_id) = self.log_viewer_window_id {
+                        tasks.push(iced::window::close(log_id));
+                    }
                     tasks.push(iced::exit());
                     return Task::batch(tasks);
                 } else if Some(id) == self.menu_window_id {
@@ -3596,6 +3702,8 @@ impl MpvNe {
                     return Task::done(Message::ClosePanelWindow);
                 } else if Some(id) == self.app_settings_window_id {
                     return Task::done(Message::CloseAppSettingsWindow);
+                } else if Some(id) == self.log_viewer_window_id {
+                    return Task::done(Message::CloseLogViewerWindow);
                 }
             }
 
@@ -4702,6 +4810,8 @@ impl MpvNe {
             ui::panel_window_view(self)
         } else if Some(window) == self.app_settings_window_id {
             ui::app_settings::view(self)
+        } else if Some(window) == self.log_viewer_window_id {
+            ui::log_viewer::view(self)
         } else {
             ui::view(self)
         }
@@ -5028,7 +5138,15 @@ impl MpvNe {
     fn load_path(&mut self, path: std::path::PathBuf) {
         self.recent_files.record(&path);
         self.recent_files.save();
-        let (list, idx) = if self.auto_load_siblings {
+        // Streaming manifests are their own playlists - mixing them into a
+        // folder sibling list makes no sense and breaks live playback (e.g.
+        // a recorder's .m3u8 dropped in Temp gets surrounded by unrelated
+        // files that have nothing to do with the stream).
+        let is_manifest = path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| matches!(s.to_ascii_lowercase().as_str(), "m3u8" | "m3u" | "mpd"))
+            .unwrap_or(false);
+        let (list, idx) = if self.auto_load_siblings && !is_manifest {
             build_folder_playlist(&path)
         } else {
             (vec![path.clone()], 0)
@@ -5207,6 +5325,8 @@ impl MpvNe {
             "MPV-NE - Settings".to_string()
         } else if Some(window) == self.panel_window_id {
             "MPV-NE - Panel".to_string()
+        } else if Some(window) == self.log_viewer_window_id {
+            "MPV-NE - Log Viewer".to_string()
         } else {
             self.title_str()
         }
@@ -5288,6 +5408,13 @@ impl MpvNe {
             iced::time::every(std::time::Duration::from_millis(150))
                 .map(|_| Message::PollThumbBar),
         );
+        // Refresh the Log Viewer from the ring buffer while it's open.
+        if self.log_viewer_window_id.is_some() {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(300))
+                    .map(|_| Message::LogViewerTick),
+            );
+        }
         Subscription::batch(subs)
     }
 }
@@ -5354,6 +5481,12 @@ fn needs_ytdl(url: &str) -> bool {
     // Only web pages need an extractor. Anything mpv can open directly -
     // other protocols, or a local path - never does.
     if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return false;
+    }
+
+    // Local server streams are never web pages - mpv opens them directly.
+    // yt-dlp has no extractor for localhost anyway.
+    if lower.starts_with("http://localhost") || lower.starts_with("http://127.0.0.1") {
         return false;
     }
 
