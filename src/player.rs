@@ -622,15 +622,26 @@ impl Player {
         (0..count)
             .filter_map(|i| {
                 let name = get_prop_string(h, &format!("audio-device-list/{i}/name"))?;
-                let description = get_prop_string(h, &format!("audio-device-list/{i}/description"))
-                    .filter(|d| !d.is_empty())
-                    // mpv's own entry for the default is named "auto" with no
-                    // description; give it something readable.
-                    .unwrap_or_else(|| if name == "auto" {
-                        "System default".to_string()
-                    } else {
-                        name.clone()
-                    });
+                let raw = get_prop_string(h, &format!("audio-device-list/{i}/description"))
+                    .filter(|d| !d.is_empty());
+
+                // The list holds two different kinds of thing. Back-ends that
+                // can enumerate hardware contribute one entry per real device,
+                // named "<ao>/<device>"; those that cannot contribute a single
+                // entry named after the driver itself ("openal", "sdl",
+                // "null"). Selecting one of the latter swaps the whole audio
+                // subsystem rather than picking a speaker, which is rarely
+                // what someone browsing a device list intends - so say which
+                // is which instead of rendering them identically.
+                let description = if name == "auto" {
+                    // mpv's default entry has no description of its own.
+                    "System default".to_string()
+                } else if name.contains('/') {
+                    raw.unwrap_or_else(|| name.clone())
+                } else {
+                    let label = raw.unwrap_or_else(|| name.clone());
+                    format!("{label}  (output driver)")
+                };
                 Some(AudioDevice { name, description })
             })
             .collect()
