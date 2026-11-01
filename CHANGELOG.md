@@ -6,6 +6,26 @@ session, so this represents the full feature history.
 
 ---
 
+## [0.5.3] — 2026-11-01
+
+A fix for an audio setting that could silently leave you with no sound.
+
+### Fixes
+- **Output drivers are now labelled in the audio device picker.** mpv's
+  device list mixes two different kinds of entry: back-ends that can
+  enumerate hardware contribute one entry per real device, while those
+  that cannot contribute a single entry named after the driver itself -
+  `openal`, `sdl`, `null`. The picker showed only each entry's
+  description, so an entire audio subsystem looked exactly like a
+  speaker. Choosing one swapped the output back-end rather than picking
+  a device, which presents as crackling, latency or silence with nothing
+  to say why. Those entries now read as "OpenAL  (output driver)".
+
+  If you hit this, pick "System default" in Playback settings → Audio →
+  Output device to recover.
+
+---
+
 ## [0.5.2] — 2026-09-10
 
 Three additions to what the player can tell you and control.
